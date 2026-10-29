@@ -1,0 +1,6 @@
+{
+  "name": "SupplyChain Optimizer & Inventory Forecasting",
+  "description": "Multi-tenant real-time Supply Chain Optimization and Inventory Forecasting platform with D3.js analytics, OAuth2 security, RBAC, and live WebSocket synchronization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
