@@ -1,0 +1,492 @@
+{
+  "entities": {
+    "AdminDoc": {
+      "title": "AdminDoc",
+      "description": "Trusted administrator marker document for RBAC.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the administrator"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["SUPER_ADMIN"],
+          "maxLength": 32,
+          "description": "Administrator privilege level"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        }
+      },
+      "required": ["uid", "role", "createdAt"]
+    },
+    "UserProfileDoc": {
+      "title": "UserProfileDoc",
+      "description": "User workspace profile isolated from raw PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner Firebase Auth UID"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Display name"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["SUPER_ADMIN", "OPS_MANAGER", "INVENTORY_ANALYST", "AUDITOR"],
+          "maxLength": 32,
+          "description": "Assigned RBAC role"
+        },
+        "activeTenantId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Currently selected tenant ID"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp"
+        }
+      },
+      "required": ["uid", "name", "role", "activeTenantId", "createdAt", "updatedAt"]
+    },
+    "TenantWorkspaceDoc": {
+      "title": "TenantWorkspaceDoc",
+      "description": "Multi-tenant supply chain workspace metadata document.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Tenant identifier"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Creator UID"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Organization name"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 20,
+          "pattern": "^[A-Za-z0-9\\-]+$",
+          "description": "Short tenant code"
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Cloud region"
+        },
+        "currencySymbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 5,
+          "description": "Currency symbol"
+        },
+        "currencyLocale": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 16,
+          "description": "Locale string for number formatting"
+        },
+        "today": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "description": "Reference date YYYY-MM-DD"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "name",
+        "code",
+        "region",
+        "currencySymbol",
+        "currencyLocale",
+        "today",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProductDoc": {
+      "title": "ProductDoc",
+      "description": "Product SKU record inside a tenant workspace.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Numeric product ID"
+        },
+        "tenantId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent tenant ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner UID"
+        },
+        "sku": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 20,
+          "pattern": "^[A-Za-z0-9\\-]+$",
+          "description": "Unique product SKU"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Product name"
+        },
+        "cost": {
+          "type": "number",
+          "description": "Unit cost (>= 0)"
+        },
+        "lead": {
+          "type": "number",
+          "description": "Lead time in days (0-365)"
+        },
+        "opening": {
+          "type": "number",
+          "description": "Opening stock balance"
+        },
+        "safety": {
+          "type": "number",
+          "description": "Safety stock units"
+        },
+        "rop": {
+          "type": "number",
+          "description": "Reorder point units"
+        },
+        "base": {
+          "type": "number",
+          "description": "Baseline daily demand parameter"
+        },
+        "sup": {
+          "type": "number",
+          "description": "Supplier numeric ID"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "ownerId",
+        "sku",
+        "name",
+        "cost",
+        "lead",
+        "opening",
+        "safety",
+        "rop",
+        "base",
+        "sup",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TransactionDoc": {
+      "title": "TransactionDoc",
+      "description": "Immutable stock ledger transaction entry inside a tenant workspace.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Numeric transaction ID"
+        },
+        "tenantId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent tenant ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Creator UID"
+        },
+        "pid": {
+          "type": "number",
+          "description": "Target product ID"
+        },
+        "date": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "description": "Transaction date YYYY-MM-DD"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["IN", "OUT", "ADJUST"],
+          "maxLength": 10,
+          "description": "Ledger operation type"
+        },
+        "qty": {
+          "type": "number",
+          "description": "Signed quantity delta"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Transaction note"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "ownerId",
+        "pid",
+        "date",
+        "type",
+        "qty",
+        "note",
+        "createdAt"
+      ]
+    },
+    "PurchaseOrderDoc": {
+      "title": "PurchaseOrderDoc",
+      "description": "Purchase order record inside a tenant workspace.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9\\-]+$",
+          "description": "PO identifier e.g. PO-1001"
+        },
+        "tenantId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent tenant ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Creator UID"
+        },
+        "sup": {
+          "type": "number",
+          "description": "Supplier numeric ID"
+        },
+        "pid": {
+          "type": "number",
+          "description": "Product numeric ID"
+        },
+        "qty": {
+          "type": "number",
+          "description": "Ordered quantity (> 0)"
+        },
+        "od": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "description": "Order date YYYY-MM-DD"
+        },
+        "ex": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "description": "Expected receipt date YYYY-MM-DD"
+        },
+        "rc": {
+          "type": "string",
+          "maxLength": 10,
+          "description": "Actual receipt date YYYY-MM-DD or empty string"
+        },
+        "st": {
+          "type": "string",
+          "enum": ["pending", "received", "cancelled"],
+          "maxLength": 16,
+          "description": "PO status"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "ownerId",
+        "sup",
+        "pid",
+        "qty",
+        "od",
+        "ex",
+        "rc",
+        "st",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AuditLogDoc": {
+      "title": "AuditLogDoc",
+      "description": "Immutable security and administrative audit log record.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Numeric sequence ID"
+        },
+        "tenantId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent tenant ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Actor UID"
+        },
+        "k": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Audit category"
+        },
+        "m": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Audit action message"
+        },
+        "d": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "description": "Date string YYYY-MM-DD"
+        },
+        "actorRole": {
+          "type": "string",
+          "enum": ["SUPER_ADMIN", "OPS_MANAGER", "INVENTORY_ANALYST", "AUDITOR"],
+          "maxLength": 32,
+          "description": "Role at time of action"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["INFO", "WARN", "CRITICAL"],
+          "maxLength": 16,
+          "description": "Log severity"
+        },
+        "n": {
+          "type": "number",
+          "description": "Monotonic sequence number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "ownerId",
+        "k",
+        "m",
+        "d",
+        "actorRole",
+        "severity",
+        "n",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminDoc" },
+      "description": "Trusted admin lookup collection."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfileDoc" },
+      "description": "User workspace profiles."
+    },
+    "/tenants/{tenantId}": {
+      "schema": { "$ref": "#/entities/TenantWorkspaceDoc" },
+      "description": "Multi-tenant workspaces."
+    },
+    "/tenants/{tenantId}/products/{productId}": {
+      "schema": { "$ref": "#/entities/ProductDoc" },
+      "description": "Products in a tenant workspace."
+    },
+    "/tenants/{tenantId}/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/TransactionDoc" },
+      "description": "Inventory ledger transactions in a tenant workspace."
+    },
+    "/tenants/{tenantId}/purchaseOrders/{poId}": {
+      "schema": { "$ref": "#/entities/PurchaseOrderDoc" },
+      "description": "Supplier purchase orders in a tenant workspace."
+    },
+    "/tenants/{tenantId}/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLogDoc" },
+      "description": "Security and activity audit logs in a tenant workspace."
+    }
+  }
+}

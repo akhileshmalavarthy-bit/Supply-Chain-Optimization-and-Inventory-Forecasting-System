@@ -1,0 +1,260 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'akhileshmalavarthy@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isTenantMasterOwner(tenantId) {
+      return exists(/databases/$(database)/documents/tenants/$(tenantId)) &&
+        get(/databases/$(database)/documents/tenants/$(tenantId)).data.ownerId == request.auth.uid;
+    }
+
+    // 3. Entity Blueprint Validation Helpers
+    function isValidAdminDoc(data) {
+      return data.keys().hasAll(['uid', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'role', 'createdAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.role is string && data.role.size() <= 32 && data.role == 'SUPER_ADMIN' &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUserProfileDoc(data) {
+      return data.keys().hasAll(['uid', 'name', 'role', 'activeTenantId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'name', 'role', 'activeTenantId', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.role is string && data.role.size() <= 32 &&
+        (data.role == 'SUPER_ADMIN' || data.role == 'OPS_MANAGER' || data.role == 'INVENTORY_ANALYST' || data.role == 'AUDITOR') &&
+        data.activeTenantId is string && data.activeTenantId.size() >= 1 && data.activeTenantId.size() <= 64 && data.activeTenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTenantWorkspaceDoc(data) {
+      return data.keys().hasAll(['id', 'ownerId', 'name', 'code', 'region', 'currencySymbol', 'currencyLocale', 'today', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerId', 'name', 'code', 'region', 'currencySymbol', 'currencyLocale', 'today', 'createdAt', 'updatedAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 64 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId == request.auth.uid &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.code is string && data.code.size() >= 2 && data.code.size() <= 20 && data.code.matches('^[A-Za-z0-9\\-]+$') &&
+        data.region is string && data.region.size() >= 1 && data.region.size() <= 60 &&
+        data.currencySymbol is string && data.currencySymbol.size() >= 1 && data.currencySymbol.size() <= 5 &&
+        data.currencyLocale is string && data.currencyLocale.size() >= 2 && data.currencyLocale.size() <= 16 &&
+        data.today is string && data.today.size() == 10 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidProductDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'ownerId', 'sku', 'name', 'cost', 'lead', 'opening', 'safety', 'rop', 'base', 'sup', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'ownerId', 'sku', 'name', 'cost', 'lead', 'opening', 'safety', 'rop', 'base', 'sup', 'createdAt', 'updatedAt']) &&
+        data.id is number && data.id >= 1 &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId == request.auth.uid &&
+        data.sku is string && data.sku.size() >= 3 && data.sku.size() <= 20 && data.sku.matches('^[A-Za-z0-9\\-]+$') &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+        data.cost is number && data.cost >= 0 &&
+        data.lead is number && data.lead >= 0 && data.lead <= 365 &&
+        data.opening is number && data.opening >= 0 && data.opening <= 10000000 &&
+        data.safety is number && data.safety >= 0 && data.safety <= 1000000 &&
+        data.rop is number && data.rop >= 0 && data.rop <= 1000000 &&
+        data.base is number && data.base >= 0 &&
+        data.sup is number && data.sup >= 1 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTransactionDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'ownerId', 'pid', 'date', 'type', 'qty', 'note', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'ownerId', 'pid', 'date', 'type', 'qty', 'note', 'createdAt']) &&
+        data.id is number && data.id >= 1 &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId == request.auth.uid &&
+        data.pid is number && data.pid >= 1 &&
+        data.date is string && data.date.size() == 10 &&
+        data.type is string && data.type.size() <= 10 && (data.type == 'IN' || data.type == 'OUT' || data.type == 'ADJUST') &&
+        data.qty is number && data.qty != 0 &&
+        data.note is string && data.note.size() >= 1 && data.note.size() <= 120 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidPurchaseOrderDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'ownerId', 'sup', 'pid', 'qty', 'od', 'ex', 'rc', 'st', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'ownerId', 'sup', 'pid', 'qty', 'od', 'ex', 'rc', 'st', 'createdAt', 'updatedAt']) &&
+        data.id is string && data.id.size() >= 3 && data.id.size() <= 32 && data.id.matches('^[A-Za-z0-9\\-]+$') &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId == request.auth.uid &&
+        data.sup is number && data.sup >= 1 &&
+        data.pid is number && data.pid >= 1 &&
+        data.qty is number && data.qty >= 1 &&
+        data.od is string && data.od.size() == 10 &&
+        data.ex is string && data.ex.size() == 10 &&
+        data.rc is string && data.rc.size() <= 10 &&
+        data.st is string && data.st.size() <= 16 && (data.st == 'pending' || data.st == 'received' || data.st == 'cancelled') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLogDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'ownerId', 'k', 'm', 'd', 'actorRole', 'severity', 'n', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'ownerId', 'k', 'm', 'd', 'actorRole', 'severity', 'n', 'createdAt']) &&
+        data.id is number && data.id >= 1 &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId == request.auth.uid &&
+        data.k is string && data.k.size() >= 1 && data.k.size() <= 40 &&
+        data.m is string && data.m.size() >= 1 && data.m.size() <= 200 &&
+        data.d is string && data.d.size() == 10 &&
+        data.actorRole is string && data.actorRole.size() <= 32 &&
+        (data.actorRole == 'SUPER_ADMIN' || data.actorRole == 'OPS_MANAGER' || data.actorRole == 'INVENTORY_ANALYST' || data.actorRole == 'AUDITOR') &&
+        data.severity is string && data.severity.size() <= 16 &&
+        (data.severity == 'INFO' || data.severity == 'WARN' || data.severity == 'CRITICAL') &&
+        data.n is number && data.n >= 1 &&
+        data.createdAt is timestamp;
+    }
+
+    // 4. Collection Rules
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list: if false;
+      allow create: if isSignedIn() && isValidId(adminId) && isValidAdminDoc(incoming()) && incoming().uid == adminId && incoming().createdAt == request.time && isAdmin();
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(adminId) && isAdmin();
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidId(userId) && isValidUserProfileDoc(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (incoming().role == 'INVENTORY_ANALYST' || isAdmin());
+      allow update: if isSignedIn() && isValidId(userId) && isValidUserProfileDoc(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (request.auth.uid == userId && incoming().role == existing().role && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'activeTenantId', 'updatedAt']))
+        );
+      allow delete: if isSignedIn() && isValidId(userId) && isAdmin();
+    }
+
+    match /tenants/{tenantId} {
+      allow get: if isSignedIn() && isValidId(tenantId) && (existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidId(tenantId) && isValidTenantWorkspaceDoc(incoming()) &&
+        incoming().id == tenantId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && isValidId(tenantId) && isValidTenantWorkspaceDoc(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'region', 'today', 'updatedAt']))
+        );
+      allow delete: if isSignedIn() && isValidId(tenantId) && isAdmin();
+
+      match /products/{productId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && (isTenantMasterOwner(tenantId) || isAdmin());
+        allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && isValidProductDoc(incoming()) &&
+          incoming().tenantId == tenantId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (isTenantMasterOwner(tenantId) || isAdmin());
+        allow update: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && isValidProductDoc(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().tenantId == existing().tenantId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isAdmin() ||
+            (isTenantMasterOwner(tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['sku', 'name', 'cost', 'lead', 'opening', 'safety', 'rop', 'sup', 'updatedAt']))
+          );
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && (isTenantMasterOwner(tenantId) || isAdmin());
+      }
+
+      match /transactions/{transactionId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && (isTenantMasterOwner(tenantId) || isAdmin());
+        allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && isValidTransactionDoc(incoming()) &&
+          incoming().tenantId == tenantId &&
+          incoming().createdAt == request.time &&
+          (isTenantMasterOwner(tenantId) || isAdmin());
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && (isTenantMasterOwner(tenantId) || isAdmin());
+      }
+
+      match /purchaseOrders/{poId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && (isTenantMasterOwner(tenantId) || isAdmin());
+        allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && isValidPurchaseOrderDoc(incoming()) &&
+          incoming().id == poId &&
+          incoming().tenantId == tenantId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (isTenantMasterOwner(tenantId) || isAdmin());
+        allow update: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && isValidPurchaseOrderDoc(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().tenantId == existing().tenantId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isAdmin() ||
+            (isTenantMasterOwner(tenantId) && existing().st == 'pending' && incoming().diff(existing()).affectedKeys().hasOnly(['rc', 'st', 'updatedAt']))
+          );
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && isAdmin();
+      }
+
+      match /auditLogs/{logId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(logId) && (isTenantMasterOwner(tenantId) || isAdmin());
+        allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(logId) && isValidAuditLogDoc(incoming()) &&
+          incoming().tenantId == tenantId &&
+          incoming().createdAt == request.time &&
+          (isTenantMasterOwner(tenantId) || isAdmin());
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(logId) && isAdmin();
+      }
+    }
+  }
+}

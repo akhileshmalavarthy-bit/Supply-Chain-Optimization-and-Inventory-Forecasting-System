@@ -1,7 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
@@ -22,8 +21,6 @@ import {
 dotenv.config();
 
 const PORT = 3000;
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DB_PATH = path.join(DATA_DIR, 'supply_chain_db.json');
 
 // Deterministic PRNG matching the prototype's Mulberry32 seed=42
 function createSeededRandom(initialSeed: number) {
@@ -57,7 +54,7 @@ function sum(a: number[]): number {
   return a.reduce((x, y) => x + y, 0);
 }
 
-interface DatabaseSchema {
+interface RuntimeDatabase {
   tenants: Tenant[];
   users: UserProfile[];
   tenantStates: Record<string, TenantDataState>;
@@ -100,87 +97,89 @@ function buildTenantSeedData(tenant: Tenant, seedVal: number, costMultiplier = 1
   const ACT: AuditLogEntry[] = [];
   let seq = 1;
 
-  const P: Product[] = rawProducts.map((a) => ({
-    id: a[0],
-    tenantId: tenant.id,
-    sku: a[1],
-    name: a[2],
-    cost: a[3],
-    lead: a[4],
-    opening: 0,
-    safety: a[6],
-    rop: 0,
-    base: a[7],
-    sup: a[8],
-    _targetSt: a[5],
-  })).map((item) => {
-    const targetSt = (item as unknown as { _targetSt: number })._targetSt;
-    const a: number[] = [];
-    for (let i = 0; i < DAYS; i++) {
-      a.push(
-        Math.max(
-          0,
-          Math.round(
-            item.base *
-              (1 + 0.2 * Math.sin((i * 2 * Math.PI) / 7)) *
-              (1 + (0.1 * i) / DAYS) *
-              (0.85 + 0.3 * R())
-          )
-        )
-      );
-    }
-    DEM[item.id] = a;
-
-    let s = 0;
-    const n = 3 + Math.floor(R() * 3);
-    for (let k = 0; k < n; k++) {
-      const inn = R() < 0.45;
-      const q = Math.max(1, Math.round(item.base * (inn ? 4 + R() * 4 : 1 + R() * 3)));
-      TX.push({
-        id: 0,
-        tenantId: tenant.id,
-        pid: item.id,
-        date: ds(add(TODAY, -Math.floor(R() * 25))),
-        type: inn ? 'IN' : 'OUT',
-        qty: inn ? q : -q,
-        note: inn ? 'Supplier delivery (verified)' : 'Customer order fulfillment',
-        actorName: 'ops.automation@supplychain.io',
-      });
-      s += inn ? q : -q;
-    }
-
-    let o = targetSt - s;
-    if (o < 0) {
-      o = 0;
-      TX.push({
-        id: 0,
-        tenantId: tenant.id,
-        pid: item.id,
-        date: ds(add(TODAY, -1)),
-        type: 'ADJUST',
-        qty: targetSt - s,
-        note: 'Cycle count correction',
-        actorName: 'auditor@supplychain.io',
-      });
-    }
-
-    const avgD30 = sum(a.slice(-30)) / 30;
-    const rop = Math.round(avgD30 * item.lead + item.safety);
-
-    return {
-      id: item.id,
+  const P: Product[] = rawProducts
+    .map((a) => ({
+      id: a[0],
       tenantId: tenant.id,
-      sku: item.sku,
-      name: item.name,
-      cost: item.cost,
-      lead: item.lead,
-      opening: o,
-      safety: item.safety,
-      rop,
-      base: item.base,
-      sup: item.sup,
-    };
-  });
+      sku: a[1],
+      name: a[2],
+      cost: a[3],
+      lead: a[4],
+      opening: 0,
+      safety: a[6],
+      rop: 0,
+      base: a[7],
+      sup: a[8],
+      _targetSt: a[5],
+    }))
+    .map((item) => {
+      const targetSt = (item as unknown as { _targetSt: number })._targetSt;
+      const a: number[] = [];
+      for (let i = 0; i < DAYS; i++) {
+        a.push(
+          Math.max(
+            0,
+            Math.round(
+              item.base *
+                (1 + 0.2 * Math.sin((i * 2 * Math.PI) / 7)) *
+                (1 + (0.1 * i) / DAYS) *
+                (0.85 + 0.3 * R())
+            )
+          )
+        );
+      }
+      DEM[item.id] = a;
+
+      let s = 0;
+      const n = 3 + Math.floor(R() * 3);
+      for (let k = 0; k < n; k++) {
+        const inn = R() < 0.45;
+        const q = Math.max(1, Math.round(item.base * (inn ? 4 + R() * 4 : 1 + R() * 3)));
+        TX.push({
+          id: 0,
+          tenantId: tenant.id,
+          pid: item.id,
+          date: ds(add(TODAY, -Math.floor(R() * 25))),
+          type: inn ? 'IN' : 'OUT',
+          qty: inn ? q : -q,
+          note: inn ? 'Supplier delivery (verified)' : 'Customer order fulfillment',
+          actorName: 'ops.automation@supplychain.io',
+        });
+        s += inn ? q : -q;
+      }
+
+      let o = targetSt - s;
+      if (o < 0) {
+        o = 0;
+        TX.push({
+          id: 0,
+          tenantId: tenant.id,
+          pid: item.id,
+          date: ds(add(TODAY, -1)),
+          type: 'ADJUST',
+          qty: targetSt - s,
+          note: 'Cycle count correction',
+          actorName: 'auditor@supplychain.io',
+        });
+      }
+
+      const avgD30 = sum(a.slice(-30)) / 30;
+      const rop = Math.round(avgD30 * item.lead + item.safety);
+
+      return {
+        id: item.id,
+        tenantId: tenant.id,
+        sku: item.sku,
+        name: item.name,
+        cost: item.cost,
+        lead: item.lead,
+        opening: o,
+        safety: item.safety,
+        rop,
+        base: item.base,
+        sup: item.sup,
+      };
+    });
 
   TX.sort((a, b) => (a.date < b.date ? -1 : 1));
   TX.forEach((t, i) => {
@@ -228,7 +227,7 @@ function buildTenantSeedData(tenant: Tenant, seedVal: number, costMultiplier = 1
       timestamp: new Date().toISOString(),
       actorEmail,
       actorRole,
-      ip: '10.24.88.14',
+      ip: 'Firestore-Cloud',
       severity,
       n: num,
     });
@@ -258,7 +257,7 @@ function buildTenantSeedData(tenant: Tenant, seedVal: number, costMultiplier = 1
       );
     }
   });
-  act('OAuth2 Security', `Multi-tenant RBAC policy enforced for ${tenant.name}`, TD, 'INFO');
+  act('Firestore Ready', `Cloud Firestore persistence configured for ${tenant.name}`, TD, 'INFO');
 
   return {
     tenant,
@@ -273,19 +272,7 @@ function buildTenantSeedData(tenant: Tenant, seedVal: number, costMultiplier = 1
   };
 }
 
-function initializeDatabase(): DatabaseSchema {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (fs.existsSync(DB_PATH)) {
-    try {
-      const raw = fs.readFileSync(DB_PATH, 'utf-8');
-      return JSON.parse(raw) as DatabaseSchema;
-    } catch (e) {
-      console.error('Error reading existing DB, re-seeding:', e);
-    }
-  }
-
+function initializeRuntimeState(): RuntimeDatabase {
   const tenants: Tenant[] = [
     {
       id: 'tenant-in-01',
@@ -368,32 +355,19 @@ function initializeDatabase(): DatabaseSchema {
     'tenant-us-03': buildTenantSeedData(tenants[2], 256, 0.013),
   };
 
-  const db: DatabaseSchema = { tenants, users, tenantStates };
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
-  return db;
+  return { tenants, users, tenantStates };
 }
 
-const db: DatabaseSchema = initializeDatabase();
+const db: RuntimeDatabase = initializeRuntimeState();
 
-function saveDb() {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to persist DB:', err);
-  }
-}
-
-// Active OAuth2 Bearer tokens map -> userId
-const oauthTokens = new Map<string, { userId: string; issuedAt: number; expiresAt: number }>();
-// Default session token for seamless startup
+const sessionTokens = new Map<string, { userId: string; issuedAt: number; expiresAt: number }>();
 const DEFAULT_TOKEN = 'oauth2_ent_tok_akhilesh_superadmin_2026';
-oauthTokens.set(DEFAULT_TOKEN, {
+sessionTokens.set(DEFAULT_TOKEN, {
   userId: 'usr-admin-01',
   issuedAt: Date.now(),
   expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 7,
 });
 
-// Role permissions matrix
 const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
   SUPER_ADMIN: [
     'products:write',
@@ -422,7 +396,6 @@ async function startServer() {
 
   app.use(express.json({ limit: '2mb' }));
 
-  // 1. Express Performance & Low-Latency Telemetry Middleware
   app.use((req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     req.requestStartMs = performance.now();
     res.on('finish', () => {
@@ -432,11 +405,10 @@ async function startServer() {
     next();
   });
 
-  // 2. OAuth2 Bearer Token & Tenant Context Middleware
-  const authenticateOAuth2 = (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  const authenticateSession = (req: AuthenticatedRequest, _res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : DEFAULT_TOKEN;
-    const session = oauthTokens.get(token) || oauthTokens.get(DEFAULT_TOKEN)!;
+    const session = sessionTokens.get(token) || sessionTokens.get(DEFAULT_TOKEN)!;
     const user = db.users.find((u) => u.id === session.userId) || db.users[0];
     req.user = user;
 
@@ -446,26 +418,21 @@ async function startServer() {
       user.tenantIds[0] ||
       'tenant-in-01';
 
-    if (!db.tenantStates[requestedTenant]) {
-      req.tenantId = 'tenant-in-01';
-    } else {
-      req.tenantId = requestedTenant;
-    }
+    req.tenantId = db.tenantStates[requestedTenant] ? requestedTenant : 'tenant-in-01';
     next();
   };
 
-  // 3. RBAC Authorization Middleware Factory
   const requirePermission = (permission: string) => {
     return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
       const user = req.user;
       if (!user) {
-        res.status(401).json({ error: 'Unauthenticated OAuth2 session.' });
+        res.status(401).json({ error: 'Unauthenticated session.' });
         return;
       }
       const allowed = ROLE_PERMISSIONS[user.role] || [];
       if (!allowed.includes(permission)) {
         const tenantId = req.tenantId || 'tenant-in-01';
-        appendAuditLog(
+        const auditLog = appendAuditLog(
           tenantId,
           'RBAC Denied',
           `Blocked ${user.role} (${user.email}) from executing '${permission}'`,
@@ -480,6 +447,7 @@ async function startServer() {
         });
         res.status(403).json({
           error: `RBAC Policy Violation: Role '${user.role}' does not have '${permission}' permission.`,
+          auditLog,
         });
         return;
       }
@@ -487,7 +455,6 @@ async function startServer() {
     };
   };
 
-  // WebSocket Presence & Real-Time Sync Infrastructure
   const clients = new Map<WebSocket, PresenceClient>();
 
   function broadcastPresence() {
@@ -503,7 +470,10 @@ async function startServer() {
   function broadcastToTenant(tenantId: string, payload: Record<string, unknown>) {
     const msg = JSON.stringify(payload);
     for (const [ws, meta] of clients.entries()) {
-      if (ws.readyState === WebSocket.OPEN && (meta.tenantId === tenantId || payload.type === 'tenant:created')) {
+      if (
+        ws.readyState === WebSocket.OPEN &&
+        (meta.tenantId === tenantId || payload.type === 'tenant:created')
+      ) {
         ws.send(msg);
       }
     }
@@ -519,8 +489,7 @@ async function startServer() {
     customDate?: string
   ): AuditLogEntry {
     const state = db.tenantStates[tenantId];
-    const nextN =
-      state.auditLogs.reduce((max, item) => Math.max(max, item.n), 0) + 1;
+    const nextN = state.auditLogs.reduce((max, item) => Math.max(max, item.n), 0) + 1;
     const entry: AuditLogEntry = {
       id: nextN,
       tenantId,
@@ -530,12 +499,11 @@ async function startServer() {
       timestamp: new Date().toISOString(),
       actorEmail,
       actorRole,
-      ip: '10.24.88.14',
+      ip: 'Firestore-Cloud',
       severity,
       n: nextN,
     };
     state.auditLogs.push(entry);
-    saveDb();
     return entry;
   }
 
@@ -567,11 +535,9 @@ async function startServer() {
             });
             broadcastPresence();
           }
-        } else if (data.type === 'ping') {
-          ws.send(JSON.stringify({ type: 'pong', ts: data.ts }));
         }
       } catch {
-        // Ignore malformed WS messages
+        // Ignore malformed WS payloads
       }
     });
 
@@ -581,101 +547,39 @@ async function startServer() {
     });
   });
 
-  // --- OAuth2 Endpoints ---
-  app.get('/api/auth/url', (req: Request, res: Response) => {
-    const appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
-    const redirectUri = `${appUrl.replace(/\/$/, '')}/auth/callback`;
-    const provider = (req.query.provider as string) || 'google-oauth2';
-
-    if (process.env.OAUTH_CLIENT_ID) {
-      const params = new URLSearchParams({
-        client_id: process.env.OAUTH_CLIENT_ID,
-        redirect_uri: redirectUri,
-        response_type: 'code',
-        scope: 'openid email profile',
-        state: provider,
-      });
-      const providerAuthUrl =
-        process.env.OAUTH_PROVIDER_URL || 'https://accounts.google.com/o/oauth2/v2/auth';
-      res.json({
-        url: `${providerAuthUrl}?${params.toString()}`,
-        mode: 'external_oauth2',
-        redirectUri,
-      });
+  // Sync Firestore snapshot into Express runtime state for WebSocket & API consistency
+  app.post('/api/firestore/sync-tenant', authenticateSession, (req: AuthenticatedRequest, res: Response) => {
+    const tenantId = req.tenantId || 'tenant-in-01';
+    const state = db.tenantStates[tenantId];
+    if (!state) {
+      res.status(404).json({ error: 'Tenant not found' });
       return;
     }
-
-    // Self-contained OAuth2 PKCE authorization grant endpoint for immediate preview testing
-    res.json({
-      url: `${redirectUri}?code=oauth2_pkce_code_${crypto.randomBytes(6).toString('hex')}&provider=${encodeURIComponent(provider)}`,
-      mode: 'embedded_oauth2_pkce',
-      redirectUri,
-    });
+    const { products, transactions, purchaseOrders, auditLogs } = req.body;
+    if (Array.isArray(products) && products.length > 0) {
+      state.products = products;
+      for (const p of products) {
+        if (!state.demand[p.id]) {
+          state.demand[p.id] = state.dates.map(() => 0);
+        }
+      }
+    }
+    if (Array.isArray(transactions) && transactions.length > 0) {
+      state.transactions = transactions;
+    }
+    if (Array.isArray(purchaseOrders) && purchaseOrders.length > 0) {
+      state.purchaseOrders = purchaseOrders;
+    }
+    if (Array.isArray(auditLogs) && auditLogs.length > 0) {
+      state.auditLogs = auditLogs;
+    }
+    res.json({ ok: true, state });
   });
 
-  const oauthCallbackHandler = (req: Request, res: Response) => {
-    const code = (req.query.code as string) || 'oauth2_verified_code';
-    const provider = (req.query.provider as string) || 'google-oauth2';
-    const token = 'oauth2_tok_' + crypto.randomBytes(12).toString('hex');
-    const user = db.users[0];
-    user.oauthProvider = provider as UserProfile['oauthProvider'];
-    user.lastActive = new Date().toISOString();
-
-    oauthTokens.set(token, {
-      userId: user.id,
-      issuedAt: Date.now(),
-      expiresAt: Date.now() + 1000 * 60 * 60 * 24,
-    });
-
-    appendAuditLog(
-      'tenant-in-01',
-      'OAuth2 Login',
-      `Verified OAuth2 authorization code (${code.slice(0, 14)}...) via ${provider}`,
-      'INFO',
-      user.email,
-      user.role
-    );
-    broadcastToTenant('tenant-in-01', {
-      type: 'state:sync',
-      tenantId: 'tenant-in-01',
-      state: db.tenantStates['tenant-in-01'],
-    });
-
-    res.send(`<!DOCTYPE html>
-<html>
-  <head>
-    <title>OAuth2 Security Handshake</title>
-    <style>
-      body { background: #0a0a0a; color: #f2f2f2; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-      .box { background: #141414; border: 1px solid #2b2b2b; border-top: 3px solid #e11d2e; padding: 24px 32px; border-radius: 12px; text-align: center; max-width: 400px; }
-      h3 { margin: 0 0 8px; color: #22c55e; }
-      p { color: #9b9b9b; font-size: 13px; }
-    </style>
-  </head>
-  <body>
-    <div class="box">
-      <h3>OAuth2 Token Issued</h3>
-      <p>PKCE handshake completed. Syncing credentials with workspace...</p>
-    </div>
-    <script>
-      if (window.opener) {
-        window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: '${token}' }, '*');
-        setTimeout(() => window.close(), 350);
-      } else {
-        window.location.href = '/';
-      }
-    </script>
-  </body>
-</html>`);
-  };
-
-  app.get(['/auth/callback', '/auth/callback/'], oauthCallbackHandler);
-
-  // Switch active user / RBAC role via OAuth2 token exchange
-  app.post('/api/auth/switch-user', authenticateOAuth2, (req: AuthenticatedRequest, res: Response) => {
+  app.post('/api/auth/switch-user', authenticateSession, (req: AuthenticatedRequest, res: Response) => {
     const { userId, role } = req.body;
     const tenantId = req.tenantId || 'tenant-in-01';
-    let targetUser = db.users.find((u) => u.id === userId) || req.user!;
+    const targetUser = db.users.find((u) => u.id === userId) || req.user!;
 
     if (role && ['SUPER_ADMIN', 'OPS_MANAGER', 'INVENTORY_ANALYST', 'AUDITOR'].includes(role)) {
       targetUser.role = role as UserRole;
@@ -683,16 +587,16 @@ async function startServer() {
     targetUser.lastActive = new Date().toISOString();
 
     const newToken = 'oauth2_tok_' + crypto.randomBytes(10).toString('hex');
-    oauthTokens.set(newToken, {
+    sessionTokens.set(newToken, {
       userId: targetUser.id,
       issuedAt: Date.now(),
       expiresAt: Date.now() + 1000 * 60 * 60 * 24,
     });
 
-    appendAuditLog(
+    const auditLog = appendAuditLog(
       tenantId,
-      'OAuth2 / RBAC',
-      `Session switched to ${targetUser.name} [${targetUser.role}] via OAuth2 token exchange`,
+      'RBAC Session',
+      `Session switched to ${targetUser.name} [${targetUser.role}]`,
       'INFO',
       targetUser.email,
       targetUser.role
@@ -708,11 +612,11 @@ async function startServer() {
       token: newToken,
       user: targetUser,
       permissions: ROLE_PERMISSIONS[targetUser.role],
+      auditLog,
     });
   });
 
-  // --- Bootstrap & State Sync Endpoint ---
-  app.get('/api/bootstrap', authenticateOAuth2, (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/bootstrap', authenticateSession, (req: AuthenticatedRequest, res: Response) => {
     const tenantId = req.tenantId || 'tenant-in-01';
     const user = req.user!;
     res.json({
@@ -722,15 +626,12 @@ async function startServer() {
       tenants: db.tenants,
       activeTenantId: tenantId,
       state: db.tenantStates[tenantId],
-      oauthConfigured: Boolean(process.env.OAUTH_CLIENT_ID),
-      appUrl: process.env.APP_URL || `${req.protocol}://${req.get('host')}`,
     });
   });
 
-  // --- Products CRUD ---
   app.post(
     '/api/products',
-    authenticateOAuth2,
+    authenticateSession,
     requirePermission('products:write'),
     (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.tenantId!;
@@ -766,8 +667,7 @@ async function startServer() {
         return;
       }
 
-      const nextId =
-        state.products.reduce((max, x) => Math.max(max, x.id), 0) + 1;
+      const nextId = state.products.reduce((max, x) => Math.max(max, x.id), 0) + 1;
       const newProduct: Product = {
         id: nextId,
         tenantId,
@@ -785,7 +685,7 @@ async function startServer() {
       state.products.push(newProduct);
       state.demand[nextId] = state.dates.map(() => 0);
 
-      appendAuditLog(
+      const auditLog = appendAuditLog(
         tenantId,
         'Product added',
         `${cleanName} (${cleanSku}) added`,
@@ -800,13 +700,13 @@ async function startServer() {
         state,
       });
 
-      res.json({ product: newProduct, state });
+      res.json({ product: newProduct, auditLog, state });
     }
   );
 
   app.put(
     '/api/products/:id',
-    authenticateOAuth2,
+    authenticateSession,
     requirePermission('products:write'),
     (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.tenantId!;
@@ -854,7 +754,7 @@ async function startServer() {
         existing.opening +
         sum(state.transactions.filter((t) => t.pid === existing.id).map((t) => t.qty));
 
-      existing.opening += +stock - currentLedgerStock;
+      existing.opening = Math.max(0, existing.opening + (+stock - currentLedgerStock));
       existing.sku = cleanSku;
       existing.name = cleanName;
       existing.cost = +cost;
@@ -863,7 +763,7 @@ async function startServer() {
       existing.safety = +safe;
       existing.sup = +sup || existing.sup;
 
-      appendAuditLog(
+      const auditLog = appendAuditLog(
         tenantId,
         'Product updated',
         `${existing.name} (${existing.sku}) updated`,
@@ -878,13 +778,13 @@ async function startServer() {
         state,
       });
 
-      res.json({ product: existing, state });
+      res.json({ product: existing, auditLog, state });
     }
   );
 
   app.delete(
     '/api/products/:id',
-    authenticateOAuth2,
+    authenticateSession,
     requirePermission('products:delete'),
     (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.tenantId!;
@@ -897,10 +797,11 @@ async function startServer() {
         return;
       }
 
+      const deletedTxIds = state.transactions.filter((t) => t.pid === id).map((t) => t.id);
       state.products = state.products.filter((x) => x.id !== id);
       state.transactions = state.transactions.filter((t) => t.pid !== id);
 
-      appendAuditLog(
+      const auditLog = appendAuditLog(
         tenantId,
         'Product removed',
         `${existing.name} (${existing.sku}) deleted`,
@@ -915,14 +816,13 @@ async function startServer() {
         state,
       });
 
-      res.json({ state });
+      res.json({ deletedTxIds, auditLog, state });
     }
   );
 
-  // --- Inventory Transactions Ledger ---
   app.post(
     '/api/transactions',
-    authenticateOAuth2,
+    authenticateSession,
     requirePermission('inventory:write'),
     (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.tenantId!;
@@ -958,8 +858,7 @@ async function startServer() {
         return;
       }
 
-      const nextTxId =
-        state.transactions.reduce((max, x) => Math.max(max, x.id), 0) + 1;
+      const nextTxId = state.transactions.reduce((max, x) => Math.max(max, x.id), 0) + 1;
       const dt = date || state.today;
       const cleanNote = String(note || '')
         .trim()
@@ -977,7 +876,7 @@ async function startServer() {
       };
 
       state.transactions.push(tx);
-      appendAuditLog(
+      const auditLog = appendAuditLog(
         tenantId,
         'Stock ' + txType,
         `${txType} ${Math.abs(delta)} × ${product.name}`,
@@ -994,14 +893,13 @@ async function startServer() {
       });
 
       const newStock = currentStock + delta;
-      res.json({ transaction: tx, newStock, state });
+      res.json({ transaction: tx, auditLog, newStock, state });
     }
   );
 
-  // --- Purchase Orders & Supplier Fulfillment ---
   app.post(
     '/api/purchase-orders',
-    authenticateOAuth2,
+    authenticateSession,
     requirePermission('po:write'),
     (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.tenantId!;
@@ -1032,7 +930,7 @@ async function startServer() {
       };
 
       state.purchaseOrders.push(po);
-      appendAuditLog(
+      const auditLog = appendAuditLog(
         tenantId,
         'Purchase order',
         `${po.id} created (${orderQty} × ${product.name}), expected ${po.ex}`,
@@ -1047,13 +945,13 @@ async function startServer() {
         state,
       });
 
-      res.json({ purchaseOrder: po, state });
+      res.json({ purchaseOrder: po, auditLog, state });
     }
   );
 
   app.patch(
     '/api/purchase-orders/:id',
-    authenticateOAuth2,
+    authenticateSession,
     requirePermission('po:write'),
     (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.tenantId!;
@@ -1066,14 +964,16 @@ async function startServer() {
       }
 
       const { status } = req.body;
+      let createdTransaction: InventoryTransaction | null = null;
+      let auditLog: AuditLogEntry | null = null;
+
       if (status === 'received' && po.st !== 'received') {
         po.st = 'received';
         po.rc = state.today;
         const product = state.products.find((p) => p.id === po.pid);
         if (product) {
-          const nextTxId =
-            state.transactions.reduce((max, x) => Math.max(max, x.id), 0) + 1;
-          state.transactions.push({
+          const nextTxId = state.transactions.reduce((max, x) => Math.max(max, x.id), 0) + 1;
+          createdTransaction = {
             id: nextTxId,
             tenantId,
             pid: product.id,
@@ -1082,9 +982,10 @@ async function startServer() {
             qty: po.qty,
             note: `PO receipt ${po.id}`,
             actorName: user.email,
-          });
+          };
+          state.transactions.push(createdTransaction);
         }
-        appendAuditLog(
+        auditLog = appendAuditLog(
           tenantId,
           'Purchase order',
           `${po.id} received (+${po.qty} units credited to ledger)`,
@@ -1094,7 +995,7 @@ async function startServer() {
         );
       } else if (status === 'cancelled') {
         po.st = 'cancelled';
-        appendAuditLog(
+        auditLog = appendAuditLog(
           tenantId,
           'Purchase order',
           `${po.id} cancelled`,
@@ -1110,14 +1011,13 @@ async function startServer() {
         state,
       });
 
-      res.json({ purchaseOrder: po, state });
+      res.json({ purchaseOrder: po, createdTransaction, auditLog, state });
     }
   );
 
-  // --- Multi-Tenant Provisioning & RBAC Administration ---
   app.post(
     '/api/tenants',
-    authenticateOAuth2,
+    authenticateSession,
     requirePermission('tenants:manage'),
     (req: AuthenticatedRequest, res: Response) => {
       const user = req.user!;
@@ -1130,14 +1030,19 @@ async function startServer() {
         return;
       }
 
-      const newId = 'tenant-' + cleanCode.toLowerCase().replace(/[^a-z0-9]/g, '') + '-' + (db.tenants.length + 1);
+      const newId =
+        'tenant-' +
+        cleanCode.toLowerCase().replace(/[^a-z0-9]/g, '') +
+        '-' +
+        (db.tenants.length + 1);
       const newTenant: Tenant = {
         id: newId,
         name: cleanName,
         code: cleanCode,
         region: String(region || 'Global Edge'),
         currencySymbol: String(currencySymbol || '₹'),
-        currencyLocale: currencySymbol === '$' ? 'en-US' : currencySymbol === '€' ? 'de-DE' : 'en-IN',
+        currencyLocale:
+          currencySymbol === '$' ? 'en-US' : currencySymbol === '€' ? 'de-DE' : 'en-IN',
         status: 'ACTIVE',
         createdAt: ds(new Date()),
       };
@@ -1175,44 +1080,6 @@ async function startServer() {
     }
   );
 
-  app.patch(
-    '/api/users/:id/role',
-    authenticateOAuth2,
-    requirePermission('users:manage'),
-    (req: AuthenticatedRequest, res: Response) => {
-      const tenantId = req.tenantId!;
-      const actor = req.user!;
-      const targetUser = db.users.find((u) => u.id === req.params.id);
-      const { role } = req.body;
-
-      if (!targetUser || !['SUPER_ADMIN', 'OPS_MANAGER', 'INVENTORY_ANALYST', 'AUDITOR'].includes(role)) {
-        res.status(400).json({ error: 'Invalid user or role.' });
-        return;
-      }
-
-      const prevRole = targetUser.role;
-      targetUser.role = role as UserRole;
-
-      appendAuditLog(
-        tenantId,
-        'RBAC Policy',
-        `Updated ${targetUser.email} role from ${prevRole} to ${role}`,
-        'WARN',
-        actor.email,
-        actor.role
-      );
-
-      broadcastToTenant(tenantId, {
-        type: 'state:sync',
-        tenantId,
-        state: db.tenantStates[tenantId],
-      });
-
-      res.json({ users: db.users, state: db.tenantStates[tenantId] });
-    }
-  );
-
-  // Vite middleware in development, static dist in production
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },

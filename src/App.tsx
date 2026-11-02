@@ -1,4 +1,17 @@
 import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
+import { onAuthStateChanged, signInWithPopup, signOut, User as FirebaseUser } from 'firebase/auth';
+import { auth, googleProvider, firebaseConfig } from './firebase';
+import {
+  ensureUserProfileInFirestore,
+  ensureTenantSeededInFirestore,
+  subscribeToTenantCollections,
+  persistProductToFirestore,
+  deleteProductFromFirestore,
+  persistTransactionToFirestore,
+  persistPurchaseOrderToFirestore,
+  persistAuditLogToFirestore,
+  persistNewTenantToFirestore,
+} from './services/firestoreSync';
 import {
   Tenant,
   UserProfile,
@@ -30,7 +43,9 @@ import {
   FileSpreadsheet,
   ShieldCheck,
   Building2,
-  KeyRound,
+  Database,
+  LogIn,
+  LogOut,
   Plus,
   Search,
   CheckCircle2,
@@ -58,7 +73,12 @@ export default function App() {
   const [activePage, setActivePage] = useState<PageKey>('dash');
   const [barLoading, setBarLoading] = useState(false);
 
-  // Auth, RBAC & Multi-Tenant state
+  // Firebase Auth & Firestore Persistence State
+  const [fbUser, setFbUser] = useState<FirebaseUser | null>(null);
+  const [authReady, setAuthReady] = useState<boolean>(false);
+  const [firestoreSynced, setFirestoreSynced] = useState<boolean>(false);
+
+  // RBAC & Multi-Tenant state
   const [token, setToken] = useState<string>('oauth2_ent_tok_akhilesh_superadmin_2026');
   const [user, setUser] = useState<UserProfile | null>(null);
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
@@ -68,7 +88,6 @@ export default function App() {
   const [tenantState, setTenantState] = useState<TenantDataState | null>(null);
   const [presence, setPresence] = useState<PresenceClient[]>([]);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
-  const [appUrl, setAppUrl] = useState<string>('');
 
   // Toasts
   const [toasts, setToasts] = useState<ToastMsg[]>([]);
@@ -137,6 +156,8 @@ export default function App() {
   const [newTenantCurrency, setNewTenantCurrency] = useState<string>('₹');
 
   const wsRef = useRef<WebSocket | null>(null);
+  const tenantStateRef = useRef<TenantDataState | null>(null);
+  tenantStateRef.current = tenantState;
 
   const fetchBootstrap = useCallback(
     async (targetTenantId?: string, customToken?: string) => {
@@ -157,7 +178,6 @@ export default function App() {
         setTenants(data.tenants || []);
         setActiveTenantId(data.activeTenantId);
         setTenantState(data.state);
-        setAppUrl(data.appUrl || window.location.origin);
         if (data.state?.today) {
           setTxDate(data.state.today);
         }
@@ -185,6 +205,114 @@ export default function App() {
     fetchBootstrap();
   }, []);
 
+  // Track Firebase Auth state
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (currentUser) => {
+      setFbUser(currentUser);
+      setAuthReady(true);
+      if (!currentUser) {
+        setFirestoreSynced(false);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Attach Firestore seeding and real-time onSnapshot listeners when authenticated
+  useEffect(() => {
+    if (!authReady || !fbUser || !tenantStateRef.current) return;
+
+    let unsubSnapshots: (() => void) | null = null;
+    let cancelled = false;
+    const currentSeed = tenantStateRef.current;
+
+    async function initFirestoreForTenant() {
+      try {
+        const role: UserRole =
+          fbUser!.email === 'akhileshmalavarthy@gmail.com'
+            ? 'SUPER_ADMIN'
+            : user?.role || 'INVENTORY_ANALYST';
+
+        await ensureUserProfileInFirestore(
+          fbUser!.uid,
+          fbUser!.displayName || user?.name || 'Supply Chain User',
+          role,
+          activeTenantId
+        );
+
+        await ensureTenantSeededInFirestore(fbUser!.uid, currentSeed);
+        if (cancelled) return;
+
+        setFirestoreSynced(true);
+
+        unsubSnapshots = subscribeToTenantCollections(
+          fbUser!.uid,
+          activeTenantId,
+          fbUser!.email || user?.email || 'authenticated@supplychain.io',
+          {
+            onProducts: (products) => {
+              setTenantState((prev) => (prev ? { ...prev, products } : prev));
+              fetch('/api/firestore/sync-tenant', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${token}`,
+                  'x-tenant-id': activeTenantId,
+                },
+                body: JSON.stringify({ products }),
+              }).catch(() => {});
+            },
+            onTransactions: (transactions) => {
+              setTenantState((prev) => (prev ? { ...prev, transactions } : prev));
+              fetch('/api/firestore/sync-tenant', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${token}`,
+                  'x-tenant-id': activeTenantId,
+                },
+                body: JSON.stringify({ transactions }),
+              }).catch(() => {});
+            },
+            onPurchaseOrders: (purchaseOrders) => {
+              setTenantState((prev) => (prev ? { ...prev, purchaseOrders } : prev));
+              fetch('/api/firestore/sync-tenant', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${token}`,
+                  'x-tenant-id': activeTenantId,
+                },
+                body: JSON.stringify({ purchaseOrders }),
+              }).catch(() => {});
+            },
+            onAuditLogs: (auditLogs) => {
+              setTenantState((prev) => (prev ? { ...prev, auditLogs } : prev));
+              fetch('/api/firestore/sync-tenant', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${token}`,
+                  'x-tenant-id': activeTenantId,
+                },
+                body: JSON.stringify({ auditLogs }),
+              }).catch(() => {});
+            },
+          }
+        );
+      } catch (err) {
+        console.error('Firestore initialization error:', err);
+        showToast('Firestore sync error — check console details', true);
+      }
+    }
+
+    initFirestoreForTenant();
+
+    return () => {
+      cancelled = true;
+      if (unsubSnapshots) unsubSnapshots();
+    };
+  }, [authReady, fbUser, activeTenantId]);
+
   // Real-time WebSocket connection & auto-reconnect
   useEffect(() => {
     let isMounted = true;
@@ -203,8 +331,8 @@ export default function App() {
           ws.send(
             JSON.stringify({
               type: 'client:identify',
-              userName: user.name,
-              userEmail: user.email,
+              userName: fbUser?.displayName || user.name,
+              userEmail: fbUser?.email || user.email,
               role: user.role,
               tenantId: activeTenantId,
             })
@@ -241,25 +369,27 @@ export default function App() {
       clearTimeout(reconnectTimer);
       wsRef.current?.close();
     };
-  }, [activeTenantId, user?.email, user?.role]);
+  }, [activeTenantId, user?.email, user?.role, fbUser?.email, fbUser?.displayName]);
 
-  // Listen for OAuth2 popup postMessage completion
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        const newTok = event.data.token;
-        if (newTok) {
-          setToken(newTok);
-          fetchBootstrap(activeTenantId, newTok);
-        } else {
-          fetchBootstrap(activeTenantId);
-        }
-        showToast('OAuth2 PKCE handshake verified & token active');
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [activeTenantId, fetchBootstrap, showToast]);
+  const handleFirebaseGoogleSignIn = async () => {
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      showToast(`Connected to Firestore as ${cred.user.email}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Sign-in cancelled';
+      showToast(`Firebase Sign-In: ${msg}`, true);
+    }
+  };
+
+  const handleFirebaseSignOut = async () => {
+    try {
+      await signOut(auth);
+      setFirestoreSynced(false);
+      showToast('Signed out of Firebase Auth');
+    } catch {
+      showToast('Failed to sign out', true);
+    }
+  };
 
   const navigateTo = (page: PageKey) => {
     setBarLoading(true);
@@ -269,6 +399,7 @@ export default function App() {
 
   const handleTenantChange = (newTenantId: string) => {
     setBarLoading(true);
+    setFirestoreSynced(false);
     setActiveTenantId(newTenantId);
     fetchBootstrap(newTenantId).finally(() => {
       setTimeout(() => setBarLoading(false), 350);
@@ -277,28 +408,14 @@ export default function App() {
       wsRef.current.send(
         JSON.stringify({
           type: 'client:identify',
-          userName: user.name,
-          userEmail: user.email,
+          userName: fbUser?.displayName || user.name,
+          userEmail: fbUser?.email || user.email,
           role: user.role,
           tenantId: newTenantId,
         })
       );
     }
     showToast(`Switched tenant workspace to ${newTenantId}`);
-  };
-
-  const handleOAuthPopupLogin = async (provider = 'google-oauth2') => {
-    try {
-      const res = await fetch(`/api/auth/url?provider=${encodeURIComponent(provider)}`);
-      if (!res.ok) throw new Error('Failed to construct OAuth2 URL');
-      const { url } = await res.json();
-      const popup = window.open(url, 'oauth2_popup', 'width=560,height=640');
-      if (!popup) {
-        showToast('Popup blocked by browser. Please allow popups for OAuth2 sign-in.', true);
-      }
-    } catch {
-      showToast('Failed to initiate OAuth2 flow', true);
-    }
   };
 
   const handleSwitchUserOrRole = async (targetUserId: string, roleOverride?: UserRole) => {
@@ -320,6 +437,9 @@ export default function App() {
       setToken(data.token);
       setUser(data.user);
       setPermissions(data.permissions);
+      if (fbUser && data.auditLog) {
+        await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+      }
       showToast(`Active session: ${data.user.name} (${data.user.role})`);
     } catch {
       showToast('Error switching RBAC identity', true);
@@ -502,7 +622,13 @@ export default function App() {
       }
       setTenantState(data.state);
       setEditingProduct(null);
-      showToast('Product saved');
+      if (fbUser && data.product) {
+        await persistProductToFirestore(fbUser.uid, activeTenantId, data.product, !isEdit);
+        if (data.auditLog) {
+          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+        }
+      }
+      showToast(fbUser ? 'Product saved to Firestore' : 'Product saved');
     } catch {
       showToast('Network error saving product', true);
     }
@@ -525,7 +651,13 @@ export default function App() {
       }
       setTenantState(data.state);
       setDeletingProduct(null);
-      showToast('Product deleted');
+      if (fbUser) {
+        await deleteProductFromFirestore(activeTenantId, id, data.deletedTxIds || []);
+        if (data.auditLog) {
+          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+        }
+      }
+      showToast(fbUser ? 'Product deleted from Firestore' : 'Product deleted');
     } catch {
       showToast('Network error deleting product', true);
     }
@@ -569,6 +701,12 @@ export default function App() {
       setTenantState(data.state);
       setTxQty('');
       setTxNote('');
+      if (fbUser && data.transaction) {
+        await persistTransactionToFirestore(fbUser.uid, activeTenantId, data.transaction);
+        if (data.auditLog) {
+          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+        }
+      }
       showToast(`Transaction saved. New stock: ${data.newStock}`);
     } catch {
       showToast('Failed to save transaction', true);
@@ -691,7 +829,9 @@ export default function App() {
     const reportPayload = {
       generatedAt: new Date().toISOString(),
       tenant: tenantState?.tenant,
-      generatedBy: user?.email,
+      generatedBy: fbUser?.email || user?.email,
+      firestoreProjectId: firebaseConfig.projectId,
+      firestoreDatabaseId: firebaseConfig.firestoreDatabaseId,
       kpis: {
         totalProducts: products.length,
         totalSuppliers: suppliers.length,
@@ -737,6 +877,12 @@ export default function App() {
         return;
       }
       setTenantState(data.state);
+      if (fbUser && data.purchaseOrder) {
+        await persistPurchaseOrderToFirestore(fbUser.uid, activeTenantId, data.purchaseOrder, true);
+        if (data.auditLog) {
+          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+        }
+      }
       showToast(`Created ${data.purchaseOrder.id} (${suggestedQty} units)`);
     } catch {
       showToast('Failed to create purchase order', true);
@@ -760,6 +906,24 @@ export default function App() {
         return;
       }
       setTenantState(data.state);
+      if (fbUser && data.purchaseOrder) {
+        await persistPurchaseOrderToFirestore(
+          fbUser.uid,
+          activeTenantId,
+          data.purchaseOrder,
+          false
+        );
+        if (data.createdTransaction) {
+          await persistTransactionToFirestore(
+            fbUser.uid,
+            activeTenantId,
+            data.createdTransaction
+          );
+        }
+        if (data.auditLog) {
+          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+        }
+      }
       showToast(`Purchase order ${poId} marked ${status}`);
     } catch {
       showToast('Failed to update purchase order', true);
@@ -796,6 +960,9 @@ export default function App() {
       setTenantState(data.state);
       setNewTenantName('');
       setNewTenantCode('');
+      if (fbUser && data.tenant && data.state) {
+        await persistNewTenantToFirestore(fbUser.uid, data.tenant, data.state);
+      }
       showToast(`Provisioned tenant ${data.tenant.name}`);
     } catch {
       showToast('Failed to provision tenant', true);
@@ -859,19 +1026,59 @@ export default function App() {
           })}
         </nav>
 
-        {/* Bottom RBAC Identity Switcher & Live Sync Indicator */}
+        {/* Bottom Firestore Cloud Persistence & RBAC Switcher */}
         <div className="hidden lg:flex flex-col gap-2.5 mt-auto pt-4 border-t border-[#262626] px-1 text-xs">
+          <div className="bg-[#0d0d0d] border border-[#262626] rounded-lg p-2.5">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="font-semibold text-[#f2f2f2] flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-[#e11d2e]" />
+                Cloud Firestore
+              </span>
+              <span
+                className={`font-mono text-[11px] ${
+                  firestoreSynced ? 'text-[#22c55e]' : 'text-[#f59e0b]'
+                }`}
+              >
+                {firestoreSynced ? 'Live Sync' : 'Sign-In Needed'}
+              </span>
+            </div>
+            {fbUser ? (
+              <div className="space-y-1.5">
+                <div className="text-[11px] text-[#9b9b9b] truncate font-mono">
+                  {fbUser.email}
+                </div>
+                <button
+                  onClick={handleFirebaseSignOut}
+                  className="w-full border border-[#262626] hover:bg-[#1f1f1f] text-[#f2f2f2] rounded px-2 py-1 text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <LogOut className="w-3 h-3" /> Sign Out
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleFirebaseGoogleSignIn}
+                className="w-full bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded px-2.5 py-1.5 text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <LogIn className="w-3.5 h-3.5" /> Sign in with Google
+              </button>
+            )}
+          </div>
+
           <div className="flex items-center justify-between text-[#9b9b9b]">
             <span>Real-time WS Stream</span>
             <span className="font-mono text-[11px] text-[#f2f2f2]">
               {wsConnected ? `Connected (${presence.length})` : 'Reconnecting'}
             </span>
           </div>
+
           {user && (
             <div className="bg-[#0d0d0d] border border-[#262626] rounded-lg p-2.5">
-              <div className="font-semibold text-[#f2f2f2] truncate">{user.name}</div>
+              <div className="font-semibold text-[#f2f2f2] truncate">
+                {fbUser?.displayName || user.name}
+              </div>
               <div className="text-[11px] text-[#9b9b9b] truncate mb-2">
-                {user.email} · <span className="text-[#ff5560] font-mono">{user.role}</span>
+                {fbUser?.email || user.email} ·{' '}
+                <span className="text-[#ff5560] font-mono">{user.role}</span>
               </div>
               <label className="block text-[11px] text-[#9b9b9b] mb-1">
                 Switch Role (Live RBAC Test)
@@ -902,24 +1109,27 @@ export default function App() {
               {PAGES.find((p) => p[0] === activePage)?.[1]}
             </h1>
             <span className="text-xs text-[#9b9b9b] hidden sm:inline">
-              · {tenantState?.tenant.name} ({tenantState?.tenant.region}) · Role:{' '}
-              <strong className="text-[#f2f2f2] font-mono">{user?.role}</strong>
+              · {tenantState?.tenant.name} ({tenantState?.tenant.region}) · Firestore:{' '}
+              <strong
+                className={`font-mono ${
+                  firestoreSynced ? 'text-[#22c55e]' : 'text-[#f59e0b]'
+                }`}
+              >
+                {firestoreSynced ? 'PERSISTENT' : 'SIGN IN TO SYNC'}
+              </strong>
             </span>
           </div>
 
           <div className="flex items-center gap-2.5">
-            {/* Mobile Tenant Selector */}
-            <select
-              value={activeTenantId}
-              onChange={(e) => handleTenantChange(e.target.value)}
-              className="lg:hidden bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-xs text-[#f2f2f2]"
-            >
-              {tenants.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.code}
-                </option>
-              ))}
-            </select>
+            {!fbUser && (
+              <button
+                onClick={handleFirebaseGoogleSignIn}
+                className="bg-[#e11d2e] hover:bg-[#c3101f] text-white rounded-lg px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                Sign in with Google (Firestore)
+              </button>
+            )}
 
             <button
               onClick={handleDownloadCsvFile}
@@ -1917,29 +2127,42 @@ export default function App() {
           </section>
         )}
 
-        {/* SECTION 6: SECURITY, OAUTH2, RBAC & MULTI-TENANT ADMINISTRATION */}
+        {/* SECTION 6: FIREBASE AUTH, FIRESTORE PERSISTENCE, RBAC & MULTI-TENANT ADMIN */}
         {activePage === 'sec' && (
           <section className="space-y-4">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* OAuth2 & RBAC Control Panel */}
+              {/* Firebase Auth & RBAC Control Panel */}
               <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
                 <div className="flex items-center justify-between mb-3">
                   <h2 className="text-[15px] font-semibold flex items-center gap-2">
-                    <KeyRound className="w-4 h-4 text-[#e11d2e]" />
-                    OAuth2 Authentication & RBAC Permissions
+                    <Database className="w-4 h-4 text-[#e11d2e]" />
+                    Firebase Firestore & RBAC Permissions
                   </h2>
-                  <button
-                    onClick={() => handleOAuthPopupLogin('google-oauth2')}
-                    className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-3 py-1.5 text-xs cursor-pointer"
-                  >
-                    Re-Authenticate via OAuth2 Popup
-                  </button>
+                  {fbUser ? (
+                    <button
+                      onClick={handleFirebaseSignOut}
+                      className="border border-[#262626] hover:bg-[#1f1f1f] text-[#f2f2f2] font-semibold rounded-lg px-3 py-1.5 text-xs cursor-pointer"
+                    >
+                      Sign Out ({fbUser.email})
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleFirebaseGoogleSignIn}
+                      className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-3 py-1.5 text-xs cursor-pointer"
+                    >
+                      Sign in with Google (Firebase Auth)
+                    </button>
+                  )}
                 </div>
 
                 <p className="text-xs text-[#9b9b9b] mb-3">
-                  Active OAuth2 Callback Endpoint:{' '}
+                  Project:{' '}
                   <code className="font-mono text-[#f2f2f2] bg-[#0d0d0d] px-1.5 py-0.5 rounded">
-                    {appUrl}/auth/callback
+                    {firebaseConfig.projectId}
+                  </code>{' '}
+                  · Database:{' '}
+                  <code className="font-mono text-[#f2f2f2] bg-[#0d0d0d] px-1.5 py-0.5 rounded">
+                    {firebaseConfig.firestoreDatabaseId}
                   </code>
                 </p>
 
@@ -1948,7 +2171,7 @@ export default function App() {
                     <thead>
                       <tr className="border-b border-[#262626] text-[#9b9b9b]">
                         <th className="py-2 px-2 text-left">User Account</th>
-                        <th className="py-2 px-2 text-left">OAuth2 Provider</th>
+                        <th className="py-2 px-2 text-left">Auth Provider</th>
                         <th className="py-2 px-2 text-left">Assigned Role</th>
                         <th className="py-2 px-2 text-right">Session Action</th>
                       </tr>
@@ -2114,7 +2337,7 @@ export default function App() {
                       <th className="py-2 px-2 text-left">Severity</th>
                       <th className="py-2 px-2 text-left">Category</th>
                       <th className="py-2 px-2 text-left">Action Description</th>
-                      <th className="py-2 px-2 text-left">Actor (OAuth2 Identity)</th>
+                      <th className="py-2 px-2 text-left">Actor Identity</th>
                       <th className="py-2 px-2 text-left">RBAC Role</th>
                     </tr>
                   </thead>
