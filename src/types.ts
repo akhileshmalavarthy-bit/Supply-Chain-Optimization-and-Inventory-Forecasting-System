@@ -1,5 +1,7 @@
 export type UserRole = 'SUPER_ADMIN' | 'OPS_MANAGER' | 'INVENTORY_ANALYST' | 'AUDITOR';
 
+export type StockStatusLabel = 'In Stock' | 'Low Stock' | 'Out of Stock';
+
 export interface Tenant {
   id: string;
   name: string;
@@ -26,34 +28,78 @@ export interface Supplier {
   id: number;
   tenantId: string;
   name: string;
+  contactPerson?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  status?: 'ACTIVE' | 'ON_HOLD' | 'INACTIVE';
+  isSample?: boolean;
   leadTimeReliability?: number;
 }
 
 export interface Product {
   id: number;
+  productId?: string;
   tenantId: string;
   sku: string;
   name: string;
+  productName?: string;
+  category?: string;
+  description?: string;
+  unit?: string;
   cost: number;
+  purchaseCost?: number;
+  sellingPrice?: number;
+  currentStock?: number;
+  lowStockThreshold?: number;
+  stockStatus?: StockStatusLabel;
+  status?: 'ACTIVE' | 'DISCONTINUED';
   lead: number;
   opening: number;
   safety: number;
   rop: number;
   base: number;
   sup: number;
+  isSample?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface InventoryRecord {
+  productId: number;
+  tenantId: string;
+  sku: string;
+  productName: string;
+  quantityOnHand: number;
+  reorderLevel: number;
+  safetyStock: number;
+  warehouseLocation: string;
+  status: 'In Stock' | 'Healthy Stock' | 'Low Stock' | 'Out of Stock';
+  isSample?: boolean;
+  lastUpdated?: string;
 }
 
 export type TransactionType = 'IN' | 'OUT' | 'ADJUST';
+export type StockMovementType = 'PURCHASE' | 'SALE' | 'ADJUST';
 
 export interface InventoryTransaction {
   id: number;
   tenantId: string;
   pid: number;
+  productId?: string;
+  productName?: string;
   date: string;
   type: TransactionType;
-  qty: number; // Signed quantity in ledger: IN is +, OUT is -, ADJUST is +/-
+  transactionType?: StockMovementType;
+  qty: number; // Signed quantity in ledger: IN/PURCHASE is +, OUT/SALE is -, ADJUST is +/-
+  quantity?: number; // Absolute quantity moved
+  resultingStock?: number; // Resulting stock balance after transaction
   note: string;
+  relatedOrderId?: string;
   actorName?: string;
+  timestamp?: string;
+  createdAt?: string;
+  isSample?: boolean;
 }
 
 export type POStatus = 'pending' | 'received' | 'cancelled';
@@ -63,11 +109,56 @@ export interface PurchaseOrder {
   tenantId: string;
   sup: number;
   pid: number;
+  productName?: string;
   qty: number;
+  unitPrice?: number;
+  total?: number;
   od: string;
   ex: string;
   rc: string | null;
   st: POStatus;
+  isSample?: boolean;
+}
+
+export interface ForecastRecord {
+  productId: number;
+  tenantId: string;
+  sku: string;
+  productName: string;
+  forecastPeriod: string;
+  windowDays: number;
+  historySeries: number[];
+  predictedDailyDemand: number;
+  projectedPeriodTotal: number;
+  method: string;
+  maeMean: number;
+  maeNaive: number;
+  isSample?: boolean;
+  generatedAt?: string;
+}
+
+export interface NotificationRecord {
+  id: string;
+  tenantId: string;
+  userId: string;
+  message: string;
+  type: 'LOW_STOCK' | 'OUT_OF_STOCK' | 'PO_UPDATE' | 'SYSTEM';
+  relatedRecordId: string;
+  read: boolean;
+  createdAt?: string;
+}
+
+export interface ReportRecord {
+  id: string;
+  tenantId: string;
+  reportType: 'CSV_RECOMMENDATIONS' | 'JSON_EXECUTIVE_SUMMARY';
+  dateRange: string;
+  summary: string;
+  totalProducts: number;
+  inventoryValue: number;
+  belowRopCount: number;
+  generatedBy: string;
+  generatedAt?: string;
 }
 
 export interface AuditLogEntry {
@@ -90,9 +181,13 @@ export interface TenantDataState {
   dates: string[];
   suppliers: Supplier[];
   products: Product[];
+  inventory?: InventoryRecord[];
   demand: Record<number, number[]>;
   transactions: InventoryTransaction[];
   purchaseOrders: PurchaseOrder[];
+  forecasts?: ForecastRecord[];
+  notifications?: NotificationRecord[];
+  reports?: ReportRecord[];
   auditLogs: AuditLogEntry[];
 }
 

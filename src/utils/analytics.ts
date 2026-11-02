@@ -5,6 +5,7 @@ import {
   Supplier,
   CalculatedProductAnalytics,
   SupplierPerformanceMetrics,
+  StockStatusLabel,
 } from '../types';
 
 export function sum(arr: number[]): number {
@@ -32,6 +33,21 @@ export function formatCurrency(amount: number, symbol = '₹', locale = 'en-IN')
 }
 
 /**
+ * Automatically calculates stock status from currentStock and lowStockThreshold:
+ * - "Out of Stock" when currentStock <= 0
+ * - "Low Stock" when currentStock > 0 and currentStock <= lowStockThreshold
+ * - "In Stock" when currentStock > lowStockThreshold
+ */
+export function computeStockStatusLabel(
+  currentStock: number,
+  lowStockThreshold: number
+): StockStatusLabel {
+  if (currentStock <= 0) return 'Out of Stock';
+  if (currentStock <= lowStockThreshold) return 'Low Stock';
+  return 'In Stock';
+}
+
+/**
  * Ledger formula from specification:
  * Current Stock = Opening Stock + IN - OUT + adjustments
  * (OUT is stored as negative quantity and each adjustment as signed quantity)
@@ -42,7 +58,7 @@ export function getStock(product: Product, transactions: InventoryTransaction[])
       .filter((t) => t.pid === product.id)
       .map((t) => t.qty)
   );
-  return product.opening + txSum;
+  return Math.max(0, product.opening + txSum);
 }
 
 export function getAverageDemand(
@@ -59,11 +75,12 @@ export function getAverageDemand(
 export function getStockStatus(
   product: Product,
   transactions: InventoryTransaction[]
-): [label: string, badgeColor: 'r' | 'o' | 'g', code: 'out' | 'low' | 'ok'] {
+): [label: StockStatusLabel, badgeColor: 'r' | 'o' | 'g', code: 'out' | 'low' | 'ok'] {
   const s = getStock(product, transactions);
+  const threshold = product.lowStockThreshold ?? product.rop;
   if (s <= 0) return ['Out of Stock', 'r', 'out'];
-  if (s <= product.rop) return ['Low Stock', 'o', 'low'];
-  return ['Healthy Stock', 'g', 'ok'];
+  if (s <= threshold) return ['Low Stock', 'o', 'low'];
+  return ['In Stock', 'g', 'ok'];
 }
 
 export function getIncomingStock(

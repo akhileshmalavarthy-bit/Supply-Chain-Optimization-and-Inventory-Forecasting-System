@@ -5,10 +5,20 @@ import {
   ensureUserProfileInFirestore,
   ensureTenantSeededInFirestore,
   subscribeToTenantCollections,
-  persistProductToFirestore,
+  saveProductInFirestore,
   deleteProductFromFirestore,
-  persistTransactionToFirestore,
-  persistPurchaseOrderToFirestore,
+  formatProductId,
+  recordInventoryTransactionInFirestore,
+  createPurchaseOrderInFirestore,
+  updatePurchaseOrderStatusInFirestore,
+  saveSupplierInFirestore,
+  deleteSupplierFromFirestore,
+  saveForecastInFirestore,
+  markNotificationReadInFirestore,
+  deleteNotificationFromFirestore,
+  saveReportToFirestore,
+  deleteReportFromFirestore,
+  updateUserRoleInFirestore,
   persistAuditLogToFirestore,
   persistNewTenantToFirestore,
 } from './services/firestoreSync';
@@ -18,7 +28,15 @@ import {
   UserRole,
   TenantDataState,
   Product,
+  InventoryRecord,
+  Supplier,
+  InventoryTransaction,
+  PurchaseOrder,
+  ForecastRecord,
+  NotificationRecord,
+  ReportRecord,
   PresenceClient,
+  StockMovementType,
 } from './types';
 import {
   sum,
@@ -27,6 +45,7 @@ import {
   formatCurrency,
   getStock,
   getStockStatus,
+  computeStockStatusLabel,
   calculateProductAnalytics,
   calculateSupplierMetrics,
 } from './utils/analytics';
@@ -50,6 +69,10 @@ import {
   Search,
   CheckCircle2,
   XCircle,
+  Bell,
+  RefreshCw,
+  Trash2,
+  Sparkles,
 } from 'lucide-react';
 
 type PageKey = 'dash' | 'prod' | 'inv' | 'ana' | 'rec' | 'sec';
@@ -62,6 +85,29 @@ const PAGES: [PageKey, string][] = [
   ['rec', 'Recommendations'],
   ['sec', 'Security & Tenants'],
 ];
+
+const DEFAULT_CATEGORIES = [
+  'Computing & Displays',
+  'Peripherals & Audio',
+  'Storage Media',
+  'Networking & Cabling',
+  'General Electronics',
+];
+
+const ROLE_PERMISSIONS_MAP: Record<UserRole, string[]> = {
+  SUPER_ADMIN: [
+    'products:write',
+    'products:delete',
+    'inventory:write',
+    'po:write',
+    'tenants:manage',
+    'users:manage',
+    'reports:export',
+  ],
+  OPS_MANAGER: ['products:write', 'inventory:write', 'po:write', 'reports:export'],
+  INVENTORY_ANALYST: ['inventory:write', 'reports:export'],
+  AUDITOR: ['reports:export'],
+};
 
 interface ToastMsg {
   id: number;
@@ -77,17 +123,26 @@ export default function App() {
   const [fbUser, setFbUser] = useState<FirebaseUser | null>(null);
   const [authReady, setAuthReady] = useState<boolean>(false);
   const [firestoreSynced, setFirestoreSynced] = useState<boolean>(false);
+  const [firestoreLoading, setFirestoreLoading] = useState<boolean>(false);
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
 
   // RBAC & Multi-Tenant state
   const [token, setToken] = useState<string>('oauth2_ent_tok_akhilesh_superadmin_2026');
   const [user, setUser] = useState<UserProfile | null>(null);
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
-  const [permissions, setPermissions] = useState<string[]>([]);
+  const [permissions, setPermissions] = useState<string[]>(ROLE_PERMISSIONS_MAP.SUPER_ADMIN);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [activeTenantId, setActiveTenantId] = useState<string>('tenant-in-01');
   const [tenantState, setTenantState] = useState<TenantDataState | null>(null);
   const [presence, setPresence] = useState<PresenceClient[]>([]);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+
+  // Additional Firestore-backed collections
+  const [inventoryRecords, setInventoryRecords] = useState<InventoryRecord[]>([]);
+  const [forecastRecords, setForecastRecords] = useState<ForecastRecord[]>([]);
+  const [notifications, setNotifications] = useState<NotificationRecord[]>([]);
+  const [savedReports, setSavedReports] = useState<ReportRecord[]>([]);
+  const [notifOpen, setNotifOpen] = useState<boolean>(false);
 
   // Toasts
   const [toasts, setToasts] = useState<ToastMsg[]>([]);
@@ -104,8 +159,9 @@ export default function App() {
   const [demProductFilter, setDemProductFilter] = useState<string>('all');
   const [demMode, setDemMode] = useState<'d' | 'm'>('d');
 
-  // Products page filters & pagination
+  // Products & Inventory page filters & pagination
   const [prodQuery, setProdQuery] = useState('');
+  const [prodCategoryFilter, setProdCategoryFilter] = useState<string>('all');
   const [prodStatusFilter, setProdStatusFilter] = useState<'all' | 'ok' | 'low' | 'out'>('all');
   const [prodSort, setProdSort] = useState<'name' | 'qty' | 'val'>('name');
   const [prodPage, setProdPage] = useState(1);
@@ -114,9 +170,15 @@ export default function App() {
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [editingProduct, setEditingProduct] = useState<{
     id: number;
+    productId: string;
     sku: string;
     name: string;
+    category: string;
+    description: string;
+    unit: string;
     cost: string;
+    sellingPrice: string;
+    warehouseLocation: string;
     lead: string;
     rop: string;
     stock: string;
@@ -126,12 +188,25 @@ export default function App() {
   } | null>(null);
   const [deletingProduct, setDeletingProduct] = useState<Product | null>(null);
 
-  // Inventory form & filter state
+  // Supplier Modal
+  const [editingSupplier, setEditingSupplier] = useState<{
+    id: number;
+    name: string;
+    contactPerson: string;
+    email: string;
+    phone: string;
+    address: string;
+    status: 'ACTIVE' | 'ON_HOLD' | 'INACTIVE';
+  } | null>(null);
+
+  // Stock Purchase / Sale & Inventory Ledger form state
   const [txPid, setTxPid] = useState<number>(1);
   const [txType, setTxType] = useState<'IN' | 'OUT' | 'ADJUST'>('IN');
   const [txQty, setTxQty] = useState<string>('');
   const [txDate, setTxDate] = useState<string>('2026-10-27');
   const [txNote, setTxNote] = useState<string>('');
+  const [txOrderId, setTxOrderId] = useState<string>('');
+  const [isSubmittingTx, setIsSubmittingTx] = useState<boolean>(false);
   const [invProdFilter, setInvProdFilter] = useState<string>('all');
   const [invFromDate, setInvFromDate] = useState<string>('');
   const [invToDate, setInvToDate] = useState<string>('');
@@ -156,8 +231,25 @@ export default function App() {
   const [newTenantCurrency, setNewTenantCurrency] = useState<string>('₹');
 
   const wsRef = useRef<WebSocket | null>(null);
-  const tenantStateRef = useRef<TenantDataState | null>(null);
-  tenantStateRef.current = tenantState;
+  const seedTemplateRef = useRef<TenantDataState | null>(null);
+  const firestoreSyncedRef = useRef<boolean>(false);
+  firestoreSyncedRef.current = firestoreSynced;
+  const stockFormRef = useRef<HTMLDivElement | null>(null);
+
+  const syncExpressCache = useCallback(
+    (partial: Record<string, unknown>) => {
+      fetch('/api/firestore/sync-tenant', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          'x-tenant-id': activeTenantId,
+        },
+        body: JSON.stringify(partial),
+      }).catch(() => {});
+    },
+    [token, activeTenantId]
+  );
 
   const fetchBootstrap = useCallback(
     async (targetTenantId?: string, customToken?: string) => {
@@ -170,28 +262,32 @@ export default function App() {
             'x-tenant-id': tId,
           },
         });
-        if (!res.ok) throw new Error('Failed to load workspace state');
+        if (!res.ok) throw new Error('Failed to load workspace metadata');
         const data = await res.json();
         setUser(data.user);
         setAllUsers(data.users || []);
         setPermissions(data.permissions || []);
         setTenants(data.tenants || []);
         setActiveTenantId(data.activeTenantId);
-        setTenantState(data.state);
+        seedTemplateRef.current = data.state;
+
+        if (!firestoreSyncedRef.current) {
+          setTenantState(data.state);
+        } else {
+          setTenantState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  tenant: data.state.tenant,
+                  today: data.state.today,
+                  dates: data.state.dates,
+                }
+              : data.state
+          );
+        }
+
         if (data.state?.today) {
           setTxDate(data.state.today);
-        }
-        if (data.state?.products?.length > 0) {
-          setTxPid((prev) =>
-            data.state.products.some((p: Product) => p.id === prev)
-              ? prev
-              : data.state.products[0].id
-          );
-          setAnaForecastPid((prev) =>
-            data.state.products.some((p: Product) => p.id === prev)
-              ? prev
-              : data.state.products[0].id
-          );
         }
       } catch (err) {
         console.error(err);
@@ -212,6 +308,7 @@ export default function App() {
       setAuthReady(true);
       if (!currentUser) {
         setFirestoreSynced(false);
+        setFirestoreLoading(false);
       }
     });
     return () => unsub();
@@ -219,89 +316,108 @@ export default function App() {
 
   // Attach Firestore seeding and real-time onSnapshot listeners when authenticated
   useEffect(() => {
-    if (!authReady || !fbUser || !tenantStateRef.current) return;
+    if (!authReady || !fbUser || !seedTemplateRef.current) return;
 
     let unsubSnapshots: (() => void) | null = null;
     let cancelled = false;
-    const currentSeed = tenantStateRef.current;
+    const currentSeed = seedTemplateRef.current;
 
     async function initFirestoreForTenant() {
+      setFirestoreLoading(true);
+      setFirestoreError(null);
       try {
-        const role: UserRole =
+        const defaultRole: UserRole =
           fbUser!.email === 'akhileshmalavarthy@gmail.com'
             ? 'SUPER_ADMIN'
             : user?.role || 'INVENTORY_ANALYST';
 
-        await ensureUserProfileInFirestore(
+        const profileInfo = await ensureUserProfileInFirestore(
           fbUser!.uid,
           fbUser!.displayName || user?.name || 'Supply Chain User',
-          role,
+          fbUser!.email || user?.email || 'authenticated@supplychain.io',
+          defaultRole,
           activeTenantId
         );
 
-        await ensureTenantSeededInFirestore(fbUser!.uid, currentSeed);
+        if (!cancelled && profileInfo.role) {
+          setUser((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  name: fbUser!.displayName || prev.name,
+                  email: fbUser!.email || prev.email,
+                  role: profileInfo.role,
+                }
+              : prev
+          );
+          setPermissions(ROLE_PERMISSIONS_MAP[profileInfo.role] || []);
+        }
+
+        await ensureTenantSeededInFirestore(
+          fbUser!.uid,
+          fbUser!.email || user?.email || 'authenticated@supplychain.io',
+          currentSeed
+        );
         if (cancelled) return;
 
-        setFirestoreSynced(true);
-
-        unsubSnapshots = subscribeToTenantCollections(
-          fbUser!.uid,
-          activeTenantId,
-          fbUser!.email || user?.email || 'authenticated@supplychain.io',
-          {
-            onProducts: (products) => {
-              setTenantState((prev) => (prev ? { ...prev, products } : prev));
-              fetch('/api/firestore/sync-tenant', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${token}`,
-                  'x-tenant-id': activeTenantId,
-                },
-                body: JSON.stringify({ products }),
-              }).catch(() => {});
-            },
-            onTransactions: (transactions) => {
-              setTenantState((prev) => (prev ? { ...prev, transactions } : prev));
-              fetch('/api/firestore/sync-tenant', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${token}`,
-                  'x-tenant-id': activeTenantId,
-                },
-                body: JSON.stringify({ transactions }),
-              }).catch(() => {});
-            },
-            onPurchaseOrders: (purchaseOrders) => {
-              setTenantState((prev) => (prev ? { ...prev, purchaseOrders } : prev));
-              fetch('/api/firestore/sync-tenant', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${token}`,
-                  'x-tenant-id': activeTenantId,
-                },
-                body: JSON.stringify({ purchaseOrders }),
-              }).catch(() => {});
-            },
-            onAuditLogs: (auditLogs) => {
-              setTenantState((prev) => (prev ? { ...prev, auditLogs } : prev));
-              fetch('/api/firestore/sync-tenant', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${token}`,
-                  'x-tenant-id': activeTenantId,
-                },
-                body: JSON.stringify({ auditLogs }),
-              }).catch(() => {});
-            },
-          }
-        );
+        unsubSnapshots = subscribeToTenantCollections(activeTenantId, {
+          onProducts: (products) => {
+            setTenantState((prev) => (prev ? { ...prev, products } : prev));
+            syncExpressCache({ products });
+          },
+          onInventory: (inventory) => {
+            setInventoryRecords(inventory);
+            syncExpressCache({ inventory });
+          },
+          onSuppliers: (suppliers) => {
+            setTenantState((prev) => (prev ? { ...prev, suppliers } : prev));
+            syncExpressCache({ suppliers });
+          },
+          onTransactions: (transactions) => {
+            setTenantState((prev) => (prev ? { ...prev, transactions } : prev));
+            syncExpressCache({ transactions });
+          },
+          onPurchaseOrders: (purchaseOrders) => {
+            setTenantState((prev) => (prev ? { ...prev, purchaseOrders } : prev));
+            syncExpressCache({ purchaseOrders });
+          },
+          onForecasts: (forecasts) => {
+            setForecastRecords(forecasts);
+            setTenantState((prev) => {
+              if (!prev) return prev;
+              const updatedDemand = { ...prev.demand };
+              for (const f of forecasts) {
+                if (Array.isArray(f.historySeries) && f.historySeries.length > 0) {
+                  updatedDemand[f.productId] = f.historySeries;
+                }
+              }
+              return { ...prev, demand: updatedDemand, forecasts };
+            });
+            syncExpressCache({ forecasts });
+          },
+          onNotifications: (notifs) => {
+            setNotifications(notifs);
+            syncExpressCache({ notifications: notifs });
+          },
+          onReports: (reports) => {
+            setSavedReports(reports);
+            syncExpressCache({ reports });
+          },
+          onAuditLogs: (auditLogs) => {
+            setTenantState((prev) => (prev ? { ...prev, auditLogs } : prev));
+            syncExpressCache({ auditLogs });
+          },
+          onLoaded: () => {
+            setFirestoreSynced(true);
+            setFirestoreLoading(false);
+          },
+        });
       } catch (err) {
         console.error('Firestore initialization error:', err);
-        showToast('Firestore sync error — check console details', true);
+        const msg = err instanceof Error ? err.message : 'Firestore connection error';
+        setFirestoreError(msg);
+        setFirestoreLoading(false);
+        showToast('Firestore sync error — check banner details', true);
       }
     }
 
@@ -344,7 +460,11 @@ export default function App() {
         if (!isMounted) return;
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'state:sync' && msg.tenantId === activeTenantId) {
+          if (
+            msg.type === 'state:sync' &&
+            msg.tenantId === activeTenantId &&
+            !firestoreSyncedRef.current
+          ) {
             setTenantState(msg.state);
           } else if (msg.type === 'tenant:created') {
             setTenants(msg.tenants);
@@ -374,7 +494,7 @@ export default function App() {
   const handleFirebaseGoogleSignIn = async () => {
     try {
       const cred = await signInWithPopup(auth, googleProvider);
-      showToast(`Connected to Firestore as ${cred.user.email}`);
+      showToast(`Connected to Cloud Firestore as ${cred.user.email}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Sign-in cancelled';
       showToast(`Firebase Sign-In: ${msg}`, true);
@@ -388,6 +508,27 @@ export default function App() {
       showToast('Signed out of Firebase Auth');
     } catch {
       showToast('Failed to sign out', true);
+    }
+  };
+
+  const handleReloadSampleData = async () => {
+    if (!fbUser || !seedTemplateRef.current) {
+      showToast('Sign in with Google first to seed sample data into Firestore', true);
+      return;
+    }
+    try {
+      setFirestoreLoading(true);
+      await ensureTenantSeededInFirestore(
+        fbUser.uid,
+        fbUser.email || user?.email || 'authenticated@supplychain.io',
+        seedTemplateRef.current,
+        true
+      );
+      setFirestoreLoading(false);
+      showToast('Sample dataset seeded into Firestore (marked as SAMPLE)');
+    } catch {
+      setFirestoreLoading(false);
+      showToast('Failed to seed sample data', true);
     }
   };
 
@@ -437,8 +578,17 @@ export default function App() {
       setToken(data.token);
       setUser(data.user);
       setPermissions(data.permissions);
+      if (fbUser && roleOverride) {
+        await updateUserRoleInFirestore(
+          fbUser.uid,
+          fbUser.displayName || data.user.name,
+          fbUser.email || data.user.email,
+          roleOverride,
+          activeTenantId
+        );
+      }
       if (fbUser && data.auditLog) {
-        await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+        await persistAuditLogToFirestore(activeTenantId, data.auditLog);
       }
       showToast(`Active session: ${data.user.name} (${data.user.role})`);
     } catch {
@@ -457,13 +607,33 @@ export default function App() {
   const dates = tenantState?.dates || [];
   const todayStr = tenantState?.today || '2026-10-27';
   const auditLogs = tenantState?.auditLogs || [];
+  const nextAuditId = useMemo(
+    () => auditLogs.reduce((max, x) => Math.max(max, x.n), 0) + 1,
+    [auditLogs]
+  );
+
+  // Keep txPid valid when products list changes
+  useEffect(() => {
+    if (products.length > 0 && !products.some((p) => p.id === Number(txPid))) {
+      setTxPid(products[0].id);
+    }
+  }, [products, txPid]);
 
   const fmtCurr = useCallback(
     (n: number) => formatCurrency(n, currencySymbol, currencyLocale),
     [currencySymbol, currencyLocale]
   );
 
-  // Dashboard calculations (30d window, 60d excess threshold)
+  const getWarehouseForProduct = useCallback(
+    (pid: number) => {
+      const inv = inventoryRecords.find((r) => r.productId === pid);
+      if (inv?.warehouseLocation) return inv.warehouseLocation;
+      return `WH-${activeTenantId.includes('eu') ? 'FRA' : activeTenantId.includes('us') ? 'PDX' : 'BLR'}-A${((pid - 1) % 4) + 1}`;
+    },
+    [inventoryRecords, activeTenantId]
+  );
+
+  // Dashboard & Product/Inventory KPI calculations
   const dashAnalytics = useMemo(
     () =>
       products.map((p) =>
@@ -472,8 +642,25 @@ export default function App() {
     [products, transactions, purchaseOrders, demandMap, todayStr]
   );
 
+  const totalInventoryUnits = useMemo(
+    () => sum(products.map((p) => getStock(p, transactions))),
+    [products, transactions]
+  );
+
   const totalInventoryValue = useMemo(
-    () => sum(products.map((p) => getStock(p, transactions) * p.cost)),
+    () => sum(products.map((p) => getStock(p, transactions) * (p.purchaseCost ?? p.cost))),
+    [products, transactions]
+  );
+
+  const totalPotentialSellingValue = useMemo(
+    () =>
+      sum(
+        products.map(
+          (p) =>
+            getStock(p, transactions) *
+            (p.sellingPrice ?? Math.round((p.purchaseCost ?? p.cost) * 1.25))
+        )
+      ),
     [products, transactions]
   );
 
@@ -485,6 +672,16 @@ export default function App() {
   const outOfStockCount = useMemo(
     () => products.filter((p) => getStockStatus(p, transactions)[2] === 'out').length,
     [products, transactions]
+  );
+
+  const stockoutCount = useMemo(
+    () => dashAnalytics.filter((c) => c.f.includes('stockout')).length,
+    [dashAnalytics]
+  );
+
+  const excessCount = useMemo(
+    () => dashAnalytics.filter((c) => c.f === 'excess').length,
+    [dashAnalytics]
   );
 
   const donutCounts = useMemo<[number, number, number, number]>(() => {
@@ -542,52 +739,86 @@ export default function App() {
     };
   }, [supplierMetrics]);
 
+  // Unique categories across products + default categories
+  const availableCategories = useMemo(() => {
+    const set = new Set<string>(DEFAULT_CATEGORIES);
+    products.forEach((p) => {
+      if (p.category) set.add(p.category);
+    });
+    return Array.from(set);
+  }, [products]);
+
   // Filtered & sorted products
   const filteredProducts = useMemo(() => {
     const q = prodQuery.toLowerCase();
     const rows = products.filter((p) => {
+      const pName = (p.productName || p.name).toLowerCase();
+      const pCat = p.category || 'General Electronics';
       const matchesQ =
-        !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q);
+        !q ||
+        pName.includes(q) ||
+        p.sku.toLowerCase().includes(q) ||
+        String(p.productId || p.id).toLowerCase().includes(q) ||
+        pCat.toLowerCase().includes(q);
+      const matchesCat = prodCategoryFilter === 'all' || pCat === prodCategoryFilter;
       const stCode = getStockStatus(p, transactions)[2];
       const matchesF = prodStatusFilter === 'all' || stCode === prodStatusFilter;
-      return matchesQ && matchesF;
+      return matchesQ && matchesCat && matchesF;
     });
     rows.sort((a, b) => {
-      if (prodSort === 'name') return a.name.localeCompare(b.name);
+      if (prodSort === 'name')
+        return (a.productName || a.name).localeCompare(b.productName || b.name);
       if (prodSort === 'qty') return getStock(b, transactions) - getStock(a, transactions);
-      return getStock(b, transactions) * b.cost - getStock(a, transactions) * a.cost;
+      return (
+        getStock(b, transactions) * (b.purchaseCost ?? b.cost) -
+        getStock(a, transactions) * (a.purchaseCost ?? a.cost)
+      );
     });
     return rows;
-  }, [products, transactions, prodQuery, prodStatusFilter, prodSort]);
+  }, [products, transactions, prodQuery, prodCategoryFilter, prodStatusFilter, prodSort]);
 
   const prodTotalPages = Math.max(1, Math.ceil(filteredProducts.length / 6));
   const safeProdPage = Math.min(prodTotalPages, Math.max(1, prodPage));
 
-  // Product CRUD handlers
+  // Product CRUD handlers (Firestore-first when authenticated)
   const openProductModal = (prod?: Product) => {
     if (prod) {
+      const pCost = prod.purchaseCost ?? prod.cost;
       setEditingProduct({
         id: prod.id,
+        productId: formatProductId(prod.id, prod.productId),
         sku: prod.sku,
-        name: prod.name,
-        cost: String(prod.cost),
+        name: prod.productName || prod.name,
+        category: prod.category || 'Computing & Displays',
+        description: prod.description || `${prod.name} (${prod.sku})`,
+        unit: prod.unit || 'units',
+        cost: String(pCost),
+        sellingPrice: String(prod.sellingPrice ?? Math.round(pCost * 1.25)),
+        warehouseLocation: getWarehouseForProduct(prod.id),
         lead: String(prod.lead),
-        rop: String(prod.rop),
+        rop: String(prod.lowStockThreshold ?? prod.rop),
         stock: String(getStock(prod, transactions)),
         safe: String(prod.safety),
         sup: prod.sup,
         errors: [],
       });
     } else {
+      const nextId = products.reduce((max, x) => Math.max(max, x.id), 0) + 1;
       setEditingProduct({
         id: 0,
-        sku: '',
+        productId: formatProductId(nextId),
+        sku: `SKU-${String(nextId).padStart(3, '0')}`,
         name: '',
+        category: 'Computing & Displays',
+        description: '',
+        unit: 'units',
         cost: '',
-        lead: '',
-        rop: '',
-        stock: '',
-        safe: '',
+        sellingPrice: '',
+        warehouseLocation: 'WH-BLR-A1',
+        lead: '5',
+        rop: '25',
+        stock: '50',
+        safe: '15',
         sup: suppliers[0]?.id || 1,
         errors: [],
       });
@@ -596,130 +827,493 @@ export default function App() {
 
   const handleSaveProduct = async () => {
     if (!editingProduct) return;
+    if (!permissions.includes('products:write')) {
+      showToast(`RBAC Denied: Role ${user?.role} cannot modify products`, true);
+      return;
+    }
+
     const isEdit = editingProduct.id > 0;
-    const url = isEdit ? `/api/products/${editingProduct.id}` : '/api/products';
-    const method = isEdit ? 'PUT' : 'POST';
+    const nextId = isEdit
+      ? editingProduct.id
+      : products.reduce((max, x) => Math.max(max, x.id), 0) + 1;
+    const cleanProductId = editingProduct.productId.trim()
+      ? formatProductId(nextId, editingProduct.productId.trim())
+      : formatProductId(nextId);
+    const cleanSku = editingProduct.sku.trim();
+    const cleanName = editingProduct.name.trim();
+    const cleanCategory = editingProduct.category.trim();
+    const errors: string[] = [];
+
+    if (!/^[A-Za-z0-9_-]{3,40}$/.test(cleanProductId)) {
+      errors.push('Product ID (productId) must be 3-40 letters, digits, hyphens, or underscores (e.g. PROD001).');
+    } else if (
+      products.some(
+        (p) =>
+          p.id !== editingProduct.id &&
+          formatProductId(p.id, p.productId).toLowerCase() === cleanProductId.toLowerCase()
+      )
+    ) {
+      errors.push(`Duplicate Product ID: "${cleanProductId}" already exists.`);
+    }
+    if (!/^[A-Za-z0-9-]{3,20}$/.test(cleanSku)) {
+      errors.push('SKU must be 3-20 letters, digits or hyphens.');
+    } else if (
+      products.some(
+        (p) => p.id !== editingProduct.id && p.sku.toLowerCase() === cleanSku.toLowerCase()
+      )
+    ) {
+      errors.push('Duplicate SKU: this SKU already exists.');
+    }
+    if (!cleanName || cleanName.length > 60) {
+      errors.push('Product Name is required (1-60 characters).');
+    }
+    if (!cleanCategory || cleanCategory.length > 40) {
+      errors.push('Category is required (1-40 characters).');
+    }
+    if (editingProduct.cost.trim() === '' || isNaN(+editingProduct.cost) || +editingProduct.cost < 0) {
+      errors.push('Purchase Cost must be a non-negative number (>= 0).');
+    }
+    if (
+      editingProduct.sellingPrice.trim() === '' ||
+      isNaN(+editingProduct.sellingPrice) ||
+      +editingProduct.sellingPrice < 0
+    ) {
+      errors.push('Selling Price must be a non-negative number (>= 0).');
+    }
+    const isWhole = (v: string, mx: number) =>
+      v.trim() !== '' && Number.isInteger(+v) && +v >= 0 && +v <= mx;
+    if (!isWhole(editingProduct.lead, 365))
+      errors.push('Lead time must be a whole number of days (0-365).');
+    if (!isWhole(editingProduct.rop, 1e6))
+      errors.push('Low-stock threshold (Reorder Point) must be a non-negative integer (>= 0).');
+    if (!isWhole(editingProduct.stock, 1e7))
+      errors.push('Current stock must be a non-negative integer (>= 0).');
+    if (!isWhole(editingProduct.safe, 1e6))
+      errors.push('Safety stock must be a non-negative integer (>= 0).');
+
+    if (errors.length > 0) {
+      setEditingProduct((prev) => (prev ? { ...prev, errors } : null));
+      showToast(errors[0] || 'Please fix the highlighted validation errors', true);
+      return;
+    }
+
+    const targetStock = +editingProduct.stock;
+    const lowStockThreshold = +editingProduct.rop;
+    const purchaseCostVal = +editingProduct.cost;
+    const sellingPriceVal = +editingProduct.sellingPrice;
+    const autoStockStatus = computeStockStatusLabel(targetStock, lowStockThreshold);
+
+    const existingProd = isEdit ? products.find((p) => p.id === editingProduct.id) : null;
+    const txDeltaSum = existingProd
+      ? sum(transactions.filter((t) => t.pid === existingProd.id).map((t) => t.qty))
+      : 0;
+    const newOpening = existingProd ? Math.max(0, targetStock - txDeltaSum) : targetStock;
+
+    const productRecord: Product = {
+      id: nextId,
+      productId: cleanProductId,
+      tenantId: activeTenantId,
+      sku: cleanSku,
+      name: cleanName,
+      productName: cleanName,
+      category: cleanCategory,
+      description: editingProduct.description.trim() || `${cleanName} (${cleanSku})`,
+      unit: editingProduct.unit.trim() || 'units',
+      cost: purchaseCostVal,
+      purchaseCost: purchaseCostVal,
+      sellingPrice: sellingPriceVal,
+      currentStock: targetStock,
+      lowStockThreshold,
+      stockStatus: autoStockStatus,
+      status: 'ACTIVE',
+      lead: +editingProduct.lead,
+      rop: lowStockThreshold,
+      safety: +editingProduct.safe,
+      sup: +editingProduct.sup || 1,
+      opening: newOpening,
+      base: existingProd?.base ?? 6,
+      isSample: false,
+    };
 
     try {
-      const res = await fetch(url, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-          'x-tenant-id': activeTenantId,
-        },
-        body: JSON.stringify(editingProduct),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        if (data.errors) {
-          setEditingProduct((prev) => (prev ? { ...prev, errors: data.errors } : null));
-          showToast('Please fix the highlighted errors', true);
-        } else {
+      if (fbUser) {
+        await saveProductInFirestore({
+          uid: fbUser.uid,
+          userEmail: fbUser.email || user?.email || 'authenticated@supplychain.io',
+          userRole: user?.role || 'SUPER_ADMIN',
+          tenantId: activeTenantId,
+          todayStr,
+          product: productRecord,
+          currentLedgerStock: targetStock,
+          warehouseLocation: editingProduct.warehouseLocation.trim() || 'WH-BLR-A1',
+          isNew: !isEdit,
+          nextAuditId,
+        });
+        setEditingProduct(null);
+        showToast(
+          isEdit
+            ? `Updated /products/${cleanProductId} (${productRecord.name}) in Firestore (${autoStockStatus})`
+            : `Saved /products/${cleanProductId} (${productRecord.name}) to Firestore (${autoStockStatus})`
+        );
+      } else {
+        const url = isEdit ? `/api/products/${editingProduct.id}` : '/api/products';
+        const method = isEdit ? 'PUT' : 'POST';
+        const res = await fetch(url, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+            'x-tenant-id': activeTenantId,
+          },
+          body: JSON.stringify(editingProduct),
+        });
+        const data = await res.json();
+        if (!res.ok) {
           showToast(data.error || 'Failed to save product', true);
+          return;
         }
-        return;
+        // Merge rich fields in session preview
+        setTenantState((prev) => {
+          const nextState: TenantDataState = data.state;
+          return {
+            ...nextState,
+            products: nextState.products.map((p) =>
+              p.id === nextId ? { ...p, ...productRecord } : p
+            ),
+          };
+        });
+        setEditingProduct(null);
+        showToast('Saved in session preview (Sign in with Google to persist to Firestore)');
       }
-      setTenantState(data.state);
-      setEditingProduct(null);
-      if (fbUser && data.product) {
-        await persistProductToFirestore(fbUser.uid, activeTenantId, data.product, !isEdit);
-        if (data.auditLog) {
-          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
-        }
-      }
-      showToast(fbUser ? 'Product saved to Firestore' : 'Product saved');
-    } catch {
-      showToast('Network error saving product', true);
+    } catch (err) {
+      console.error(err);
+      const errMsg = err instanceof Error ? err.message : 'Error saving product to Firestore';
+      setEditingProduct((prev) => (prev ? { ...prev, errors: [errMsg] } : null));
+      showToast(errMsg, true);
     }
   };
 
   const handleDeleteProduct = async (id: number) => {
-    try {
-      const res = await fetch(`/api/products/${id}`, {
-        method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'x-tenant-id': activeTenantId,
-        },
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        showToast(data.error || 'Failed to delete product', true);
-        setDeletingProduct(null);
-        return;
-      }
-      setTenantState(data.state);
+    if (!permissions.includes('products:delete')) {
+      showToast(`RBAC Denied: Role ${user?.role} cannot delete products`, true);
       setDeletingProduct(null);
+      return;
+    }
+    const prod = products.find((p) => p.id === id);
+    if (!prod) return;
+
+    try {
       if (fbUser) {
-        await deleteProductFromFirestore(activeTenantId, id, data.deletedTxIds || []);
-        if (data.auditLog) {
-          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+        const relatedTxIds = transactions.filter((t) => t.pid === id).map((t) => t.id);
+        await deleteProductFromFirestore({
+          tenantId: activeTenantId,
+          product: prod,
+          relatedTxIds,
+          userEmail: fbUser.email || user?.email || 'authenticated@supplychain.io',
+          userRole: user?.role || 'SUPER_ADMIN',
+          todayStr,
+          nextAuditId,
+        });
+        setDeletingProduct(null);
+        showToast(
+          `Deleted /products/${formatProductId(prod.id, prod.productId)} (${prod.name}) from Firestore`
+        );
+      } else {
+        const res = await fetch(`/api/products/${id}`, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'x-tenant-id': activeTenantId,
+          },
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(data.error || 'Failed to delete product', true);
+          setDeletingProduct(null);
+          return;
         }
+        setTenantState(data.state);
+        setDeletingProduct(null);
+        showToast('Deleted in session preview');
       }
-      showToast(fbUser ? 'Product deleted from Firestore' : 'Product deleted');
     } catch {
-      showToast('Network error deleting product', true);
+      showToast('Error deleting product from Firestore', true);
     }
   };
 
-  // Inventory Ledger warning & transaction saving
+  // Supplier CRUD handlers
+  const handleSaveSupplier = async () => {
+    if (!editingSupplier) return;
+    if (!permissions.includes('products:write')) {
+      showToast(`RBAC Denied: Role ${user?.role} cannot modify suppliers`, true);
+      return;
+    }
+    if (!editingSupplier.name.trim()) {
+      showToast('Supplier name is required', true);
+      return;
+    }
+    const isNew = editingSupplier.id === 0;
+    const nextSupId = isNew
+      ? suppliers.reduce((max, s) => Math.max(max, s.id), 0) + 1
+      : editingSupplier.id;
+
+    const supRecord: Supplier = {
+      id: nextSupId,
+      tenantId: activeTenantId,
+      name: editingSupplier.name.trim(),
+      contactPerson: editingSupplier.contactPerson.trim() || 'Operations Desk',
+      email: editingSupplier.email.trim() || 'orders@supplier.io',
+      phone: editingSupplier.phone.trim() || '+91-80-4000-0000',
+      address: editingSupplier.address.trim() || 'Industrial Logistics Park',
+      status: editingSupplier.status,
+      isSample: false,
+    };
+
+    try {
+      if (fbUser) {
+        await saveSupplierInFirestore({
+          tenantId: activeTenantId,
+          supplier: supRecord,
+          isNew,
+          userEmail: fbUser.email || user?.email || 'authenticated@supplychain.io',
+          userRole: user?.role || 'SUPER_ADMIN',
+          todayStr,
+          nextAuditId,
+        });
+        setEditingSupplier(null);
+        showToast(`Saved supplier ${supRecord.name} to Firestore`);
+      } else {
+        setTenantState((prev) => {
+          if (!prev) return prev;
+          const updated = isNew
+            ? [...prev.suppliers, supRecord]
+            : prev.suppliers.map((s) => (s.id === supRecord.id ? supRecord : s));
+          return { ...prev, suppliers: updated };
+        });
+        setEditingSupplier(null);
+        showToast('Saved supplier in session preview');
+      }
+    } catch {
+      showToast('Failed to save supplier to Firestore', true);
+    }
+  };
+
+  const handleDeleteSupplier = async (sup: Supplier) => {
+    if (!permissions.includes('products:delete')) {
+      showToast(`RBAC Denied: Role ${user?.role} cannot delete suppliers`, true);
+      return;
+    }
+    try {
+      if (fbUser) {
+        await deleteSupplierFromFirestore({
+          tenantId: activeTenantId,
+          supplier: sup,
+          userEmail: fbUser.email || user?.email || 'authenticated@supplychain.io',
+          userRole: user?.role || 'SUPER_ADMIN',
+          todayStr,
+          nextAuditId,
+        });
+        showToast(`Deleted supplier ${sup.name} from Firestore`);
+      } else {
+        setTenantState((prev) =>
+          prev ? { ...prev, suppliers: prev.suppliers.filter((s) => s.id !== sup.id) } : prev
+        );
+        showToast('Removed supplier in session preview');
+      }
+    } catch {
+      showToast('Failed to delete supplier', true);
+    }
+  };
+
+  // Stock Purchase / Sale preview & warning
+  const selectedTxProduct = useMemo(
+    () => products.find((x) => x.id === Number(txPid)) || products[0],
+    [products, txPid]
+  );
+
+  const txPreviewInfo = useMemo(() => {
+    if (!selectedTxProduct) return null;
+    const avail = getStock(selectedTxProduct, transactions);
+    const threshold = selectedTxProduct.lowStockThreshold ?? selectedTxProduct.rop;
+    const rawQty = txQty.trim() === '' ? 0 : Number(txQty);
+    const delta = txType === 'IN' ? rawQty : txType === 'OUT' ? -rawQty : rawQty;
+    const projectedStock = avail + delta;
+    const projectedStatus = computeStockStatusLabel(Math.max(0, projectedStock), threshold);
+    const isNegative = projectedStock < 0;
+    return {
+      avail,
+      threshold,
+      delta,
+      projectedStock,
+      projectedStatus,
+      isNegative,
+    };
+  }, [selectedTxProduct, transactions, txQty, txType]);
+
   const txWarning = useMemo(() => {
-    const p = products.find((x) => x.id === Number(txPid));
-    const q = Number(txQty);
-    if (!p || !q) return '';
-    const d = txType === 'IN' ? q : txType === 'OUT' ? -q : q;
-    const avail = getStock(p, transactions);
-    if (avail + d < 0) {
-      return `Warning: this would make stock negative. Available: ${avail} units. It will be rejected.`;
+    if (!txPreviewInfo || txQty.trim() === '') return '';
+    if (txPreviewInfo.isNegative) {
+      return `Warning: Sale/Out of ${Math.abs(txPreviewInfo.delta)} units exceeds available stock (${txPreviewInfo.avail} units). Negative stock is strictly prevented.`;
     }
     return '';
-  }, [products, transactions, txPid, txQty, txType]);
+  }, [txPreviewInfo, txQty]);
+
+  const handleQuickSelectStockAction = (product: Product, actionType: 'IN' | 'OUT') => {
+    setTxPid(product.id);
+    setTxType(actionType);
+    setTxQty('5');
+    setTxNote(
+      actionType === 'IN'
+        ? `Stock Purchase — ${product.productName || product.name}`
+        : `Stock Sale — ${product.productName || product.name}`
+    );
+    stockFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
 
   const handleSaveTransaction = async () => {
+    if (isSubmittingTx) return;
+    if (!permissions.includes('inventory:write')) {
+      showToast(`RBAC Denied: Role ${user?.role} cannot record stock movements`, true);
+      return;
+    }
+    const product = products.find((p) => p.id === Number(txPid));
+    const q = Number(txQty);
+    if (
+      !product ||
+      txQty.trim() === '' ||
+      !Number.isInteger(q) ||
+      q === 0 ||
+      (txType !== 'ADJUST' && q <= 0)
+    ) {
+      showToast('Enter a valid positive whole-number quantity', true);
+      return;
+    }
+
+    const currentStock = getStock(product, transactions);
+    const delta = txType === 'IN' ? q : txType === 'OUT' ? -q : q;
+    const resultingStock = currentStock + delta;
+    if (resultingStock < 0) {
+      showToast(
+        `Rejected: Stock cannot become negative (available: ${currentStock} units, requested sale: ${Math.abs(delta)} units)`,
+        true
+      );
+      return;
+    }
+
+    const movementType: StockMovementType =
+      txType === 'IN' ? 'PURCHASE' : txType === 'OUT' ? 'SALE' : 'ADJUST';
+    const nextTxId = transactions.reduce((max, x) => Math.max(max, x.id), 0) + 1;
+    const dt = txDate || todayStr;
+    const defaultNote =
+      txType === 'IN'
+        ? `Stock Purchase (+${q} units)`
+        : txType === 'OUT'
+        ? `Customer Sale (-${q} units)`
+        : `Stock Adjustment (${delta > 0 ? '+' : ''}${delta} units)`;
+
+    const txObj: InventoryTransaction = {
+      id: nextTxId,
+      tenantId: activeTenantId,
+      pid: product.id,
+      productId: String(product.id),
+      productName: product.productName || product.name,
+      date: dt,
+      type: txType,
+      transactionType: movementType,
+      qty: delta,
+      quantity: Math.abs(delta),
+      resultingStock,
+      note: (txNote.trim() || defaultNote).slice(0, 120),
+      relatedOrderId: txOrderId.trim().slice(0, 32) || '-',
+      actorName: fbUser?.email || user?.email || 'authenticated@supplychain.io',
+      timestamp: new Date().toISOString(),
+      isSample: false,
+    };
+
+    setIsSubmittingTx(true);
     try {
-      const res = await fetch('/api/transactions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-          'x-tenant-id': activeTenantId,
-        },
-        body: JSON.stringify({
-          pid: txPid,
-          type: txType,
-          qty: txQty,
-          date: txDate || todayStr,
-          note: txNote,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        showToast(data.error || 'Failed to record transaction', true);
-        return;
-      }
-      setTenantState(data.state);
-      setTxQty('');
-      setTxNote('');
-      if (fbUser && data.transaction) {
-        await persistTransactionToFirestore(fbUser.uid, activeTenantId, data.transaction);
-        if (data.auditLog) {
-          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+      if (fbUser) {
+        const newStock = await recordInventoryTransactionInFirestore({
+          uid: fbUser.uid,
+          userEmail: fbUser.email || user?.email || 'authenticated@supplychain.io',
+          userRole: user?.role || 'INVENTORY_ANALYST',
+          tenantId: activeTenantId,
+          product,
+          currentLedgerStock: currentStock,
+          tx: txObj,
+          nextAuditId,
+        });
+        setTxQty('');
+        setTxNote('');
+        setTxOrderId('');
+        const newStatus = computeStockStatusLabel(
+          newStock,
+          product.lowStockThreshold ?? product.rop
+        );
+        showToast(
+          `${movementType} recorded in Firestore! Resulting stock: ${newStock} units (${newStatus})`
+        );
+      } else {
+        const res = await fetch('/api/transactions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+            'x-tenant-id': activeTenantId,
+          },
+          body: JSON.stringify({
+            pid: txPid,
+            type: txType,
+            qty: txQty,
+            date: dt,
+            note: txObj.note,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(data.error || 'Failed to record transaction', true);
+          return;
         }
+        setTenantState(data.state);
+        setTxQty('');
+        setTxNote('');
+        setTxOrderId('');
+        showToast(`${movementType} recorded in preview. Resulting stock: ${data.newStock}`);
       }
-      showToast(`Transaction saved. New stock: ${data.newStock}`);
-    } catch {
-      showToast('Failed to save transaction', true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save transaction';
+      showToast(msg, true);
+    } finally {
+      setIsSubmittingTx(false);
     }
   };
 
   const getProductName = useCallback(
     (pid: number) => {
       const p = products.find((x) => x.id === pid);
-      return p ? p.name : '(deleted)';
+      return p ? p.productName || p.name : '(deleted)';
     },
     [products]
   );
+
+  // Compute running resultingStock for any legacy/preview transactions that don't have it explicitly stored
+  const computedResultingStockMap = useMemo(() => {
+    const map: Record<number, number> = {};
+    const runningByProd: Record<number, number> = {};
+    products.forEach((p) => {
+      runningByProd[p.id] = p.opening;
+    });
+    const chronological = [...transactions].sort((a, b) =>
+      a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id
+    );
+    chronological.forEach((t) => {
+      const prev = runningByProd[t.pid] ?? 0;
+      const next = Math.max(0, prev + t.qty);
+      runningByProd[t.pid] = next;
+      map[t.id] = t.resultingStock !== undefined ? t.resultingStock : next;
+    });
+    return map;
+  }, [products, transactions]);
 
   const filteredTransactions = useMemo(() => {
     const q = invSearch.toLowerCase();
@@ -728,8 +1322,17 @@ export default function App() {
         const matchProd = invProdFilter === 'all' || t.pid === Number(invProdFilter);
         const matchFrom = !invFromDate || t.date >= invFromDate;
         const matchTo = !invToDate || t.date <= invToDate;
-        const pName = getProductName(t.pid).toLowerCase();
-        const matchQ = !q || t.note.toLowerCase().includes(q) || pName.includes(q);
+        const pName = (t.productName || getProductName(t.pid)).toLowerCase();
+        const movLabel = (
+          t.transactionType ||
+          (t.type === 'IN' ? 'PURCHASE' : t.type === 'OUT' ? 'SALE' : 'ADJUST')
+        ).toLowerCase();
+        const matchQ =
+          !q ||
+          t.note.toLowerCase().includes(q) ||
+          pName.includes(q) ||
+          movLabel.includes(q) ||
+          (t.relatedOrderId || '').toLowerCase().includes(q);
         return matchProd && matchFrom && matchTo && matchQ;
       })
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
@@ -773,6 +1376,7 @@ export default function App() {
     for (let j = 1; j <= H; j++) {
       forecastDates.push(formatDate(addDays(todayStr, j)));
     }
+    const savedDoc = forecastRecords.find((f) => f.productId === p.id);
     return {
       product: p,
       H,
@@ -783,8 +1387,45 @@ export default function App() {
       histDates,
       histValues,
       forecastDates,
+      fullSeries: a.slice(-90),
+      savedDoc,
     };
-  }, [products, demandMap, dates, todayStr, anaForecastPid, anaWindow]);
+  }, [products, demandMap, dates, todayStr, anaForecastPid, anaWindow, forecastRecords]);
+
+  const handleSaveForecast = async () => {
+    if (!forecastEval) return;
+    if (!fbUser) {
+      showToast('Sign in with Google first to save forecasts to Firestore', true);
+      return;
+    }
+    try {
+      await saveForecastInFirestore({
+        tenantId: activeTenantId,
+        forecast: {
+          productId: forecastEval.product.id,
+          tenantId: activeTenantId,
+          sku: forecastEval.product.sku,
+          productName: forecastEval.product.name,
+          forecastPeriod: `Next ${forecastEval.H} Days`,
+          windowDays: anaWindow,
+          historySeries: forecastEval.fullSeries,
+          predictedDailyDemand: forecastEval.base,
+          projectedPeriodTotal: Math.round(forecastEval.base * forecastEval.H),
+          method: `${anaWindow}-Day Moving Average Baseline`,
+          maeMean: forecastEval.maeMean,
+          maeNaive: forecastEval.maeNaive,
+          isSample: false,
+        },
+        userEmail: fbUser.email || user?.email || 'authenticated@supplychain.io',
+        userRole: user?.role || 'INVENTORY_ANALYST',
+        todayStr,
+        nextAuditId,
+      });
+      showToast(`Saved ${forecastEval.product.name} forecast to Firestore`);
+    } catch {
+      showToast('Failed to save forecast to Firestore', true);
+    }
+  };
 
   // Recommendations rows
   const recommendationRows = useMemo(() => {
@@ -813,7 +1454,7 @@ export default function App() {
     return lines.join('\n');
   };
 
-  const handleDownloadCsvFile = () => {
+  const handleDownloadCsvFile = async () => {
     const csvText = buildCsvString();
     const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -822,10 +1463,27 @@ export default function App() {
     a.download = `supply_chain_recommendations_${activeTenantId}_${todayStr}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('Downloaded stakeholder CSV report');
+
+    if (fbUser) {
+      await saveReportToFirestore({
+        tenantId: activeTenantId,
+        reportType: 'CSV_RECOMMENDATIONS',
+        dateRange: `${dates[0] || todayStr} to ${todayStr}`,
+        summary: `Exported ${recommendationRows.length} SKU recommendations (${lowStockCount + outOfStockCount} below ROP)`,
+        totalProducts: products.length,
+        inventoryValue: totalInventoryValue,
+        belowRopCount: lowStockCount + outOfStockCount,
+        generatedBy: fbUser.email || user?.email || 'authenticated@supplychain.io',
+      }).catch(() => {});
+    }
+    showToast(
+      fbUser
+        ? 'Downloaded CSV & saved report record to Firestore'
+        : 'Downloaded stakeholder CSV report'
+    );
   };
 
-  const handleDownloadJsonReport = () => {
+  const handleDownloadJsonReport = async () => {
     const reportPayload = {
       generatedAt: new Date().toISOString(),
       tenant: tenantState?.tenant,
@@ -834,9 +1492,11 @@ export default function App() {
       firestoreDatabaseId: firebaseConfig.firestoreDatabaseId,
       kpis: {
         totalProducts: products.length,
-        totalSuppliers: suppliers.length,
-        inventoryValue: totalInventoryValue,
-        belowReorderPoint: lowStockCount + outOfStockCount,
+        totalInventoryUnits,
+        lowStockProducts: lowStockCount,
+        outOfStockProducts: outOfStockCount,
+        inventoryPurchaseValue: totalInventoryValue,
+        potentialSellingValue: totalPotentialSellingValue,
       },
       recommendations: recommendationRows.map((r) => ({
         sku: r.p.sku,
@@ -857,74 +1517,140 @@ export default function App() {
     a.download = `executive_forecast_report_${activeTenantId}_${todayStr}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('Generated stakeholder JSON audit report');
+
+    if (fbUser) {
+      await saveReportToFirestore({
+        tenantId: activeTenantId,
+        reportType: 'JSON_EXECUTIVE_SUMMARY',
+        dateRange: `${dates[0] || todayStr} to ${todayStr}`,
+        summary: `Executive JSON audit snapshot · Purchase Value ${fmtCurr(totalInventoryValue)} · Selling Value ${fmtCurr(totalPotentialSellingValue)}`,
+        totalProducts: products.length,
+        inventoryValue: totalInventoryValue,
+        belowRopCount: lowStockCount + outOfStockCount,
+        generatedBy: fbUser.email || user?.email || 'authenticated@supplychain.io',
+      }).catch(() => {});
+    }
+    showToast(
+      fbUser
+        ? 'Exported JSON & saved report record to Firestore'
+        : 'Generated stakeholder JSON audit report'
+    );
   };
 
   const handleCreatePurchaseOrder = async (pid: number, suggestedQty: number) => {
+    if (!permissions.includes('po:write')) {
+      showToast(`RBAC Denied: Role ${user?.role} cannot create purchase orders`, true);
+      return;
+    }
+    const product = products.find((p) => p.id === pid);
+    if (!product) return;
+
+    const orderQty = Math.max(1, Math.round(Number(suggestedQty) || 10));
+    const maxPoNum = purchaseOrders.reduce((max, po) => {
+      const m = /^PO-(\d+)$/.exec(po.id);
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 1000);
+    const poObj: PurchaseOrder = {
+      id: `PO-${maxPoNum + 1}`,
+      tenantId: activeTenantId,
+      sup: product.sup,
+      pid: product.id,
+      productName: product.name,
+      qty: orderQty,
+      unitPrice: product.cost,
+      total: product.cost * orderQty,
+      od: todayStr,
+      ex: formatDate(addDays(todayStr, product.lead)),
+      rc: null,
+      st: 'pending',
+      isSample: false,
+    };
+
     try {
-      const res = await fetch('/api/purchase-orders', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-          'x-tenant-id': activeTenantId,
-        },
-        body: JSON.stringify({ pid, qty: suggestedQty }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        showToast(data.error || 'Could not create PO', true);
-        return;
-      }
-      setTenantState(data.state);
-      if (fbUser && data.purchaseOrder) {
-        await persistPurchaseOrderToFirestore(fbUser.uid, activeTenantId, data.purchaseOrder, true);
-        if (data.auditLog) {
-          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
+      if (fbUser) {
+        await createPurchaseOrderInFirestore({
+          uid: fbUser.uid,
+          userEmail: fbUser.email || user?.email || 'authenticated@supplychain.io',
+          userRole: user?.role || 'OPS_MANAGER',
+          tenantId: activeTenantId,
+          todayStr,
+          po: poObj,
+          product,
+          nextAuditId,
+        });
+        showToast(`Created ${poObj.id} (${orderQty} units) in Cloud Firestore`);
+      } else {
+        const res = await fetch('/api/purchase-orders', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+            'x-tenant-id': activeTenantId,
+          },
+          body: JSON.stringify({ pid, qty: orderQty }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(data.error || 'Could not create PO', true);
+          return;
         }
+        setTenantState(data.state);
+        showToast(`Created ${data.purchaseOrder.id} in session preview`);
       }
-      showToast(`Created ${data.purchaseOrder.id} (${suggestedQty} units)`);
     } catch {
       showToast('Failed to create purchase order', true);
     }
   };
 
   const handleUpdatePoStatus = async (poId: string, status: 'received' | 'cancelled') => {
+    if (!permissions.includes('po:write')) {
+      showToast(`RBAC Denied: Role ${user?.role} cannot update purchase orders`, true);
+      return;
+    }
+    const po = purchaseOrders.find((x) => x.id === poId);
+    if (!po) return;
+    const product = products.find((p) => p.id === po.pid);
+    const currentStock = product ? getStock(product, transactions) : 0;
+    const nextTxId = transactions.reduce((max, x) => Math.max(max, x.id), 0) + 1;
+
     try {
-      const res = await fetch(`/api/purchase-orders/${poId}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-          'x-tenant-id': activeTenantId,
-        },
-        body: JSON.stringify({ status }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        showToast(data.error || 'Could not update PO', true);
-        return;
-      }
-      setTenantState(data.state);
-      if (fbUser && data.purchaseOrder) {
-        await persistPurchaseOrderToFirestore(
-          fbUser.uid,
-          activeTenantId,
-          data.purchaseOrder,
-          false
+      if (fbUser) {
+        await updatePurchaseOrderStatusInFirestore({
+          uid: fbUser.uid,
+          userEmail: fbUser.email || user?.email || 'authenticated@supplychain.io',
+          userRole: user?.role || 'OPS_MANAGER',
+          tenantId: activeTenantId,
+          todayStr,
+          po,
+          newStatus: status,
+          product,
+          currentLedgerStock: currentStock,
+          nextTxId,
+          nextAuditId,
+        });
+        showToast(
+          status === 'received'
+            ? `${poId} received (+${po.qty} units credited atomically in Firestore)`
+            : `${poId} cancelled in Firestore`
         );
-        if (data.createdTransaction) {
-          await persistTransactionToFirestore(
-            fbUser.uid,
-            activeTenantId,
-            data.createdTransaction
-          );
+      } else {
+        const res = await fetch(`/api/purchase-orders/${poId}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+            'x-tenant-id': activeTenantId,
+          },
+          body: JSON.stringify({ status }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(data.error || 'Could not update PO', true);
+          return;
         }
-        if (data.auditLog) {
-          await persistAuditLogToFirestore(fbUser.uid, activeTenantId, data.auditLog);
-        }
+        setTenantState(data.state);
+        showToast(`Purchase order ${poId} marked ${status}`);
       }
-      showToast(`Purchase order ${poId} marked ${status}`);
     } catch {
       showToast('Failed to update purchase order', true);
     }
@@ -956,18 +1682,30 @@ export default function App() {
         return;
       }
       setTenants(data.tenants);
+      seedTemplateRef.current = data.state;
+      setFirestoreSynced(false);
       setActiveTenantId(data.tenant.id);
       setTenantState(data.state);
       setNewTenantName('');
       setNewTenantCode('');
       if (fbUser && data.tenant && data.state) {
-        await persistNewTenantToFirestore(fbUser.uid, data.tenant, data.state);
+        await persistNewTenantToFirestore(
+          fbUser.uid,
+          fbUser.email || user?.email || 'authenticated@supplychain.io',
+          data.tenant,
+          data.state
+        );
       }
       showToast(`Provisioned tenant ${data.tenant.name}`);
     } catch {
       showToast('Failed to provision tenant', true);
     }
   };
+
+  const unreadNotifCount = useMemo(
+    () => notifications.filter((n) => !n.read).length,
+    [notifications]
+  );
 
   const renderStatusLabel = (text: string, colorCode: 'r' | 'o' | 'g' | 'b') => {
     const colorClasses = {
@@ -977,6 +1715,21 @@ export default function App() {
       b: 'text-[#d4d4d4]',
     }[colorCode];
     return <span className={`font-semibold text-xs ${colorClasses}`}>{text}</span>;
+  };
+
+  const renderSampleBadge = (isSample?: boolean) => {
+    if (isSample) {
+      return (
+        <span className="ml-1.5 text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-[#262626] text-[#9b9b9b]">
+          Sample
+        </span>
+      );
+    }
+    return (
+      <span className="ml-1.5 text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-[#14291a] text-[#22c55e]">
+        Live
+      </span>
+    );
   };
 
   return (
@@ -1036,10 +1789,14 @@ export default function App() {
               </span>
               <span
                 className={`font-mono text-[11px] ${
-                  firestoreSynced ? 'text-[#22c55e]' : 'text-[#f59e0b]'
+                  firestoreLoading
+                    ? 'text-[#f59e0b]'
+                    : firestoreSynced
+                    ? 'text-[#22c55e]'
+                    : 'text-[#f59e0b]'
                 }`}
               >
-                {firestoreSynced ? 'Live Sync' : 'Sign-In Needed'}
+                {firestoreLoading ? 'Syncing...' : firestoreSynced ? 'Live Sync' : 'Sign-In Needed'}
               </span>
             </div>
             {fbUser ? (
@@ -1097,13 +1854,18 @@ export default function App() {
               </select>
             </div>
           )}
+
+          <div className="pt-2 border-t border-[#262626] text-[11px] text-[#9b9b9b] leading-snug">
+            <div className="font-semibold text-[#f2f2f2]">Mohan Babu University (MBU)</div>
+            <div>Narasimha · Akhilesh · Yuvaraj · Shaheen</div>
+          </div>
         </div>
       </aside>
 
       {/* Main Content Viewport */}
       <main className="p-5 lg:p-6 min-w-0 max-w-[1600px]">
         {/* Top Header */}
-        <header className="flex flex-wrap items-center justify-between gap-4 mb-4 pb-3 border-b border-[#262626]">
+        <header className="flex flex-wrap items-center justify-between gap-4 mb-4 pb-3 border-b border-[#262626] relative">
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-bold tracking-tight">
               {PAGES.find((p) => p[0] === activePage)?.[1]}
@@ -1112,10 +1874,18 @@ export default function App() {
               · {tenantState?.tenant.name} ({tenantState?.tenant.region}) · Firestore:{' '}
               <strong
                 className={`font-mono ${
-                  firestoreSynced ? 'text-[#22c55e]' : 'text-[#f59e0b]'
+                  firestoreLoading
+                    ? 'text-[#f59e0b]'
+                    : firestoreSynced
+                    ? 'text-[#22c55e]'
+                    : 'text-[#f59e0b]'
                 }`}
               >
-                {firestoreSynced ? 'PERSISTENT' : 'SIGN IN TO SYNC'}
+                {firestoreLoading
+                  ? 'LOADING...'
+                  : firestoreSynced
+                  ? 'PERSISTENT (mystical-logic-zdtd0)'
+                  : 'DEMO PREVIEW (SIGN IN TO PERSIST)'}
               </strong>
             </span>
           </div>
@@ -1131,6 +1901,20 @@ export default function App() {
               </button>
             )}
 
+            {/* Notifications Drawer Toggle */}
+            <button
+              onClick={() => setNotifOpen((prev) => !prev)}
+              className="bg-[#141414] hover:bg-[#1f1f1f] text-[#f2f2f2] border border-[#262626] rounded-lg px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Bell className="w-3.5 h-3.5 text-[#e11d2e]" />
+              Alerts
+              {unreadNotifCount > 0 && (
+                <span className="bg-[#e11d2e] text-white font-mono text-[10px] px-1.5 py-0.2 rounded">
+                  {unreadNotifCount}
+                </span>
+              )}
+            </button>
+
             <button
               onClick={handleDownloadCsvFile}
               className="bg-[#141414] hover:bg-[#1f1f1f] text-[#f2f2f2] border border-[#262626] rounded-lg px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 transition-colors"
@@ -1139,18 +1923,109 @@ export default function App() {
               Export CSV Report
             </button>
           </div>
+
+          {/* Notifications Dropdown Panel */}
+          {notifOpen && (
+            <div className="absolute right-0 top-12 w-96 max-w-full bg-[#141414] border border-[#262626] rounded-xl p-3.5 shadow-2xl z-30">
+              <div className="flex items-center justify-between mb-2 pb-2 border-b border-[#262626]">
+                <span className="text-xs font-semibold">
+                  Firestore Notifications ({notifications.length})
+                </span>
+                <button
+                  onClick={() => setNotifOpen(false)}
+                  className="text-xs text-[#9b9b9b] hover:text-[#f2f2f2] cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+              {notifications.length === 0 ? (
+                <div className="text-xs text-[#9b9b9b] py-4 text-center">
+                  No active stock or order notifications.
+                </div>
+              ) : (
+                <ul className="divide-y divide-[#262626] max-h-64 overflow-y-auto text-xs">
+                  {notifications.slice(0, 12).map((n) => (
+                    <li key={n.id} className="py-2 flex items-start justify-between gap-2">
+                      <div>
+                        <span
+                          className={`font-mono text-[10px] mr-1.5 ${
+                            n.type === 'OUT_OF_STOCK'
+                              ? 'text-[#ff5560]'
+                              : n.type === 'LOW_STOCK'
+                              ? 'text-[#f59e0b]'
+                              : 'text-[#22c55e]'
+                          }`}
+                        >
+                          [{n.type}]
+                        </span>
+                        <span className={n.read ? 'text-[#9b9b9b]' : 'text-[#f2f2f2] font-medium'}>
+                          {n.message}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {!n.read && fbUser && (
+                          <button
+                            onClick={() => markNotificationReadInFirestore(activeTenantId, n.id)}
+                            className="text-[10px] text-[#22c55e] hover:underline cursor-pointer"
+                          >
+                            Read
+                          </button>
+                        )}
+                        {fbUser && (
+                          <button
+                            onClick={() => deleteNotificationFromFirestore(activeTenantId, n.id)}
+                            className="text-[10px] text-[#ff5560] hover:underline cursor-pointer"
+                          >
+                            Del
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </header>
 
         {/* Top Progress Transition Bar */}
         <div
           className="h-[3px] bg-[#e11d2e] rounded-xs mb-4 transition-all duration-300"
-          style={{ width: barLoading ? '100%' : '0%' }}
+          style={{ width: barLoading || firestoreLoading ? '100%' : '0%' }}
         />
+
+        {/* Firestore Status / Error Banner */}
+        {firestoreError && (
+          <div className="mb-4 bg-[#2a0f12] border border-[#ff5560] rounded-xl p-3 text-xs text-[#ff5560] flex items-center justify-between">
+            <span>Firestore Error: {firestoreError}</span>
+            <button
+              onClick={() => setFirestoreError(null)}
+              className="underline ml-3 cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {!fbUser && (
+          <div className="mb-4 bg-[#141414] border border-[#262626] rounded-xl p-3 text-xs text-[#d4d4d4] flex flex-wrap items-center justify-between gap-2">
+            <span>
+              Viewing <b className="text-[#f2f2f2]">Sample / Demo Data</b>. Sign in with Google to
+              connect to Cloud Firestore (<code className="font-mono">{firebaseConfig.projectId}</code>) so all additions, edits, and deletions persist across browser refreshes.
+            </span>
+            <button
+              onClick={handleFirebaseGoogleSignIn}
+              className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-md px-3 py-1 text-xs cursor-pointer"
+            >
+              Sign in with Google
+            </button>
+          </div>
+        )}
 
         {/* SECTION 1: DASHBOARD */}
         {activePage === 'dash' && (
           <section className="space-y-4">
-            {/* 6 KPI Grid */}
+            {/* 6 KPI Strip */}
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3.5">
               {[
                 { label: 'Total Products', val: products.length, alert: false },
@@ -1161,16 +2036,8 @@ export default function App() {
                   val: lowStockCount + outOfStockCount,
                   alert: true,
                 },
-                {
-                  label: 'Potential Stockout Risks',
-                  val: dashAnalytics.filter((c) => c.f.includes('stockout')).length,
-                  alert: true,
-                },
-                {
-                  label: 'Potential Excess Risks',
-                  val: dashAnalytics.filter((c) => c.f === 'excess').length,
-                  alert: false,
-                },
+                { label: 'Potential Stockout Risks', val: stockoutCount, alert: true },
+                { label: 'Potential Excess Risks', val: excessCount, alert: false },
               ].map((kpi) => (
                 <div
                   key={kpi.label}
@@ -1198,9 +2065,7 @@ export default function App() {
                   {[
                     [
                       'Units in stock',
-                      sum(products.map((p) => getStock(p, transactions))).toLocaleString(
-                        currencyLocale
-                      ),
+                      totalInventoryUnits.toLocaleString(currencyLocale),
                     ],
                     ['Low-stock products', lowStockCount],
                     ['Out-of-stock products', outOfStockCount],
@@ -1212,56 +2077,48 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <h2 className="text-[15px] font-semibold mb-2">
-                  Inventory Distribution (D3.js)
-                </h2>
                 <D3InventoryDonut counts={donutCounts} />
               </div>
 
               <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
-                <h2 className="text-[15px] font-semibold mb-2.5">
-                  Demand Analysis (D3.js Time-Series)
-                </h2>
-                <div className="flex flex-wrap items-center gap-2 mb-3">
-                  <select
-                    value={demProductFilter}
-                    onChange={(e) => setDemProductFilter(e.target.value)}
-                    className="bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2]"
-                  >
-                    <option value="all">All products</option>
-                    {products.map((p) => (
-                      <option key={p.id} value={String(p.id)}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={demMode}
-                    onChange={(e) => setDemMode(e.target.value as 'd' | 'm')}
-                    className="bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2]"
-                  >
-                    <option value="d">Daily (90 days)</option>
-                    <option value="m">Monthly</option>
-                  </select>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                  <h2 className="text-[15px] font-semibold">Demand Analysis (90 days)</h2>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={demProductFilter}
+                      onChange={(e) => setDemProductFilter(e.target.value)}
+                      className="bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1 text-xs text-[#f2f2f2]"
+                    >
+                      <option value="all">All products</option>
+                      {products.map((p) => (
+                        <option key={p.id} value={String(p.id)}>
+                          {p.productName || p.name}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={demMode}
+                      onChange={(e) => setDemMode(e.target.value as 'd' | 'm')}
+                      className="bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1 text-xs text-[#f2f2f2]"
+                    >
+                      <option value="d">Daily</option>
+                      <option value="m">Monthly</option>
+                    </select>
+                  </div>
                 </div>
                 <D3DemandChart
                   labels={demandChartData.labels}
                   values={demandChartData.values}
                   mode={demMode}
                 />
-                <div className="text-xs text-[#9b9b9b] mt-1">
-                  Monthly view: first and last months are partial. Hover chart to inspect exact daily or monthly demand.
-                </div>
               </div>
             </div>
 
-            {/* Row 3: Supplier Performance & Recent Real-Time Activities */}
+            {/* Row 3: Supplier Summary + Recent Real-Time Activity Stream */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
-                <h2 className="text-[15px] font-semibold mb-2.5">
-                  Supplier Performance (D3.js)
-                </h2>
-                <div className="grid grid-cols-3 gap-2.5 mb-3">
+                <h2 className="text-[15px] font-semibold mb-2.5">Supplier Summary</h2>
+                <div className="grid grid-cols-3 gap-2.5 mb-4">
                   <div className="bg-[#0d0d0d] rounded-lg p-2.5">
                     <b className="block text-lg font-mono tabular-nums">
                       {supplierSummary.totalPos}
@@ -1335,6 +2192,7 @@ export default function App() {
                   <thead>
                     <tr className="border-b border-[#262626] text-[#9b9b9b] text-xs">
                       <th className="py-2 px-2 text-left font-semibold">Product</th>
+                      <th className="py-2 px-2 text-left font-semibold">Warehouse</th>
                       <th className="py-2 px-2 text-right font-semibold">Stock</th>
                       <th className="py-2 px-2 text-right font-semibold">Reorder point</th>
                       <th className="py-2 px-2 text-left font-semibold">Status</th>
@@ -1350,12 +2208,18 @@ export default function App() {
                           suppliers.find((s) => s.id === p.sup)?.name || 'Unknown';
                         return (
                           <tr key={p.id} className="hover:bg-[#1a1a1a]">
-                            <td className="py-2.5 px-2 font-medium">{p.name}</td>
+                            <td className="py-2.5 px-2 font-medium">
+                              {p.productName || p.name}
+                              {renderSampleBadge(p.isSample)}
+                            </td>
+                            <td className="py-2.5 px-2 font-mono text-xs text-[#9b9b9b]">
+                              {getWarehouseForProduct(p.id)}
+                            </td>
                             <td className="py-2.5 px-2 text-right font-mono tabular-nums">
                               {getStock(p, transactions)}
                             </td>
                             <td className="py-2.5 px-2 text-right font-mono tabular-nums">
-                              {p.rop}
+                              {p.lowStockThreshold ?? p.rop}
                             </td>
                             <td className="py-2.5 px-2">
                               {renderStatusLabel(st[0], st[1])}
@@ -1367,8 +2231,8 @@ export default function App() {
                     {products.filter((p) => getStockStatus(p, transactions)[2] !== 'ok')
                       .length === 0 && (
                       <tr>
-                        <td colSpan={5} className="py-4 text-center text-[#9b9b9b]">
-                          No low-stock alerts. All SKUs are above their reorder point.
+                        <td colSpan={6} className="py-4 text-center text-[#9b9b9b]">
+                          No low-stock alerts. All SKUs are healthy.
                         </td>
                       </tr>
                     )}
@@ -1379,9 +2243,10 @@ export default function App() {
           </section>
         )}
 
-        {/* SECTION 2: PRODUCTS */}
+        {/* SECTION 2: PRODUCTS & SUPPLIERS CATALOG */}
         {activePage === 'prod' && (
           <section className="space-y-4">
+            {/* Products Catalog Card */}
             <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
               <div className="flex flex-wrap items-center gap-2.5 mb-3.5">
                 <div className="relative">
@@ -1392,10 +2257,25 @@ export default function App() {
                       setProdQuery(e.target.value);
                       setProdPage(1);
                     }}
-                    placeholder="Search name or SKU"
+                    placeholder="Search name, SKU, or category"
                     className="bg-[#0d0d0d] border border-[#262626] rounded-lg pl-9 pr-3 py-1.5 text-sm text-[#f2f2f2] focus:outline-2 focus:outline-[#7f1d1d]"
                   />
                 </div>
+                <select
+                  value={prodCategoryFilter}
+                  onChange={(e) => {
+                    setProdCategoryFilter(e.target.value);
+                    setProdPage(1);
+                  }}
+                  className="bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2]"
+                >
+                  <option value="all">All categories</option>
+                  {availableCategories.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
                 <select
                   value={prodStatusFilter}
                   onChange={(e) => {
@@ -1405,7 +2285,7 @@ export default function App() {
                   className="bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2]"
                 >
                   <option value="all">All statuses</option>
-                  <option value="ok">Healthy</option>
+                  <option value="ok">Healthy / In Stock</option>
                   <option value="low">Low</option>
                   <option value="out">Out of stock</option>
                 </select>
@@ -1419,22 +2299,34 @@ export default function App() {
                   <option value="val">Sort: inventory value</option>
                 </select>
 
-                <button
-                  onClick={() => openProductModal()}
-                  className="ml-auto bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-3.5 py-1.5 text-sm flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <Plus className="w-4 h-4" /> Add Product
-                </button>
+                <div className="ml-auto flex items-center gap-2">
+                  {products.length === 0 && fbUser && (
+                    <button
+                      onClick={handleReloadSampleData}
+                      className="border border-[#262626] hover:bg-[#1f1f1f] text-[#f2f2f2] rounded-lg px-3 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> Load Sample Data
+                    </button>
+                  )}
+                  <button
+                    onClick={() => openProductModal()}
+                    className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-3.5 py-1.5 text-sm flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Plus className="w-4 h-4" /> Add Product
+                  </button>
+                </div>
               </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse min-w-[680px] text-sm">
+                <table className="w-full border-collapse min-w-[820px] text-sm">
                   <thead>
                     <tr className="border-b border-[#262626] text-[#9b9b9b] text-xs">
                       <th className="py-2 px-2 text-left font-semibold">ID</th>
                       <th className="py-2 px-2 text-left font-semibold">SKU</th>
                       <th className="py-2 px-2 text-left font-semibold">Product Name</th>
+                      <th className="py-2 px-2 text-left font-semibold">Category & Warehouse</th>
                       <th className="py-2 px-2 text-right font-semibold">Unit Cost</th>
+                      <th className="py-2 px-2 text-right font-semibold">Selling Price</th>
                       <th className="py-2 px-2 text-right font-semibold">Current Stock</th>
                       <th className="py-2 px-2 text-right font-semibold">Reorder Point</th>
                       <th className="py-2 px-2 text-left font-semibold">Stock Status</th>
@@ -1446,23 +2338,36 @@ export default function App() {
                       .slice((safeProdPage - 1) * 6, safeProdPage * 6)
                       .map((p) => {
                         const st = getStockStatus(p, transactions);
+                        const curStock = getStock(p, transactions);
+                        const pCost = p.purchaseCost ?? p.cost;
+                        const sPrice = p.sellingPrice ?? Math.round(pCost * 1.25);
                         return (
                           <tr key={p.id} className="hover:bg-[#1a1a1a]">
                             <td className="py-2.5 px-2 font-mono text-xs text-[#9b9b9b] tabular-nums">
-                              {p.id}
+                              {formatProductId(p.id, p.productId)}
                             </td>
-                            <td className="py-2.5 px-2 font-mono text-xs tabular-nums">
-                              {p.sku}
+                            <td className="py-2.5 px-2 font-mono text-xs">{p.sku}</td>
+                            <td className="py-2.5 px-2 font-medium">
+                              {p.productName || p.name}
+                              {renderSampleBadge(p.isSample)}
                             </td>
-                            <td className="py-2.5 px-2 font-medium">{p.name}</td>
+                            <td className="py-2.5 px-2 text-xs text-[#9b9b9b]">
+                              <div>{p.category || 'General Electronics'}</div>
+                              <div className="font-mono text-[11px]">
+                                {getWarehouseForProduct(p.id)}
+                              </div>
+                            </td>
                             <td className="py-2.5 px-2 text-right font-mono tabular-nums">
-                              {fmtCurr(p.cost)}
+                              {fmtCurr(pCost)}
+                            </td>
+                            <td className="py-2.5 px-2 text-right font-mono tabular-nums text-[#22c55e]">
+                              {fmtCurr(sPrice)}
                             </td>
                             <td className="py-2.5 px-2 text-right font-mono tabular-nums">
-                              {getStock(p, transactions)}
+                              {curStock} {p.unit || 'units'}
                             </td>
                             <td className="py-2.5 px-2 text-right font-mono tabular-nums">
-                              {p.rop}
+                              {p.lowStockThreshold ?? p.rop}
                             </td>
                             <td className="py-2.5 px-2">
                               {renderStatusLabel(st[0], st[1])}
@@ -1492,7 +2397,7 @@ export default function App() {
                       })}
                     {filteredProducts.length === 0 && (
                       <tr>
-                        <td colSpan={8} className="py-6 text-center text-[#9b9b9b]">
+                        <td colSpan={10} className="py-6 text-center text-[#9b9b9b]">
                           No products match your filter criteria.
                         </td>
                       </tr>
@@ -1521,6 +2426,107 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {/* Suppliers Directory Card (Connected to `suppliers` Firestore collection) */}
+            <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <div>
+                  <h2 className="text-[15px] font-semibold">
+                    Suppliers Directory (Firestore `suppliers` Collection)
+                  </h2>
+                  <p className="text-xs text-[#9b9b9b]">
+                    Manage approved supply chain vendors, contact details, and status.
+                  </p>
+                </div>
+                <button
+                  onClick={() =>
+                    setEditingSupplier({
+                      id: 0,
+                      name: '',
+                      contactPerson: '',
+                      email: '',
+                      phone: '',
+                      address: '',
+                      status: 'ACTIVE',
+                    })
+                  }
+                  className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-3.5 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add Supplier
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse min-w-[680px] text-xs">
+                  <thead>
+                    <tr className="border-b border-[#262626] text-[#9b9b9b]">
+                      <th className="py-2 px-2 text-left">ID</th>
+                      <th className="py-2 px-2 text-left">Supplier Name</th>
+                      <th className="py-2 px-2 text-left">Contact Person</th>
+                      <th className="py-2 px-2 text-left">Email & Phone</th>
+                      <th className="py-2 px-2 text-left">Address</th>
+                      <th className="py-2 px-2 text-left">Status</th>
+                      <th className="py-2 px-2 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#262626]">
+                    {suppliers.map((s) => (
+                      <tr key={s.id} className="hover:bg-[#1a1a1a]">
+                        <td className="py-2 px-2 font-mono text-[#9b9b9b]">#{s.id}</td>
+                        <td className="py-2 px-2 font-medium text-[#f2f2f2]">
+                          {s.name}
+                          {renderSampleBadge(s.isSample)}
+                        </td>
+                        <td className="py-2 px-2 text-[#d4d4d4]">
+                          {s.contactPerson || 'Operations Desk'}
+                        </td>
+                        <td className="py-2 px-2 font-mono text-[#9b9b9b]">
+                          <div>{s.email || 'orders@supplier.io'}</div>
+                          <div>{s.phone || '+91-80-4000-0000'}</div>
+                        </td>
+                        <td className="py-2 px-2 text-[#9b9b9b]">
+                          {s.address || 'Bengaluru Logistics Park'}
+                        </td>
+                        <td className="py-2 px-2">
+                          {renderStatusLabel(
+                            s.status || 'ACTIVE',
+                            s.status === 'INACTIVE'
+                              ? 'r'
+                              : s.status === 'ON_HOLD'
+                              ? 'o'
+                              : 'g'
+                          )}
+                        </td>
+                        <td className="py-2 px-2 text-right space-x-1.5">
+                          <button
+                            onClick={() =>
+                              setEditingSupplier({
+                                id: s.id,
+                                name: s.name,
+                                contactPerson: s.contactPerson || 'Operations Desk',
+                                email: s.email || 'orders@supplier.io',
+                                phone: s.phone || '+91-80-4000-0000',
+                                address: s.address || 'Bengaluru Logistics Park',
+                                status: s.status || 'ACTIVE',
+                              })
+                            }
+                            className="border border-[#262626] hover:bg-[#1f1f1f] text-[#f2f2f2] rounded px-2 py-0.5 cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDeleteSupplier(s)}
+                            className="border border-[#262626] hover:bg-[#3a1015] text-[#ff5560] rounded px-2 py-0.5 cursor-pointer"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </section>
         )}
 
@@ -1528,12 +2534,12 @@ export default function App() {
         {activePage === 'inv' && (
           <section className="space-y-4">
             <div className="bg-[#120a0b] border border-[#262626] rounded-lg p-3 text-xs text-[#d8d8d8]">
-              Ledger Invariant: Current Stock = Opening Stock + IN − OUT + adjustments. OUT is stored as a negative quantity and each adjustment as one signed quantity, so nothing is counted twice. Stock is derived from the ledger, so the balance and the transaction can never disagree.
+              Ledger: Current Stock = Opening Stock + IN − OUT + adjustments. OUT is stored as a negative quantity and each adjustment as one signed quantity, so nothing is counted twice. Stock is derived from the ledger, so the balance and the transaction can never disagree.
             </div>
 
             <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
               <h2 className="text-[15px] font-semibold mb-3">Record Transaction</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
                 <div>
                   <label className="block text-xs text-[#9b9b9b] mb-1">Product</label>
                   <select
@@ -1543,7 +2549,7 @@ export default function App() {
                   >
                     {products.map((p) => (
                       <option key={p.id} value={p.id}>
-                        {p.name} (Stock: {getStock(p, transactions)})
+                        {p.productName || p.name} ({p.sku})
                       </option>
                     ))}
                   </select>
@@ -1552,9 +2558,7 @@ export default function App() {
                   <label className="block text-xs text-[#9b9b9b] mb-1">Type</label>
                   <select
                     value={txType}
-                    onChange={(e) =>
-                      setTxType(e.target.value as 'IN' | 'OUT' | 'ADJUST')
-                    }
+                    onChange={(e) => setTxType(e.target.value as 'IN' | 'OUT' | 'ADJUST')}
                     className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2]"
                   >
                     <option value="IN">IN</option>
@@ -1584,25 +2588,40 @@ export default function App() {
                     className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2] font-mono"
                   />
                 </div>
+                <div>
+                  <label className="block text-xs text-[#9b9b9b] mb-1">
+                    Related Order ID (Optional)
+                  </label>
+                  <input
+                    value={txOrderId}
+                    onChange={(e) => setTxOrderId(e.target.value)}
+                    placeholder="e.g. PO-1012 / SO-204"
+                    className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2] font-mono"
+                  />
+                </div>
               </div>
-              <div className="mt-3">
+
+              <div className="mb-3">
                 <label className="block text-xs text-[#9b9b9b] mb-1">Notes</label>
                 <input
                   value={txNote}
                   onChange={(e) => setTxNote(e.target.value)}
                   maxLength={120}
-                  placeholder="Optional reference number, cycle count reason, or PO code"
+                  placeholder="Supplier delivery reference or cycle count note"
                   className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2]"
                 />
               </div>
+
               {txWarning && (
-                <div className="text-xs text-[#ff5560] mt-2 font-medium">{txWarning}</div>
+                <div className="text-xs text-[#ff5560] mb-2.5 font-medium">{txWarning}</div>
               )}
+
               <button
+                disabled={isSubmittingTx || Boolean(txWarning)}
                 onClick={handleSaveTransaction}
-                className="mt-3 bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-4 py-2 text-sm cursor-pointer"
+                className="bg-[#e11d2e] hover:bg-[#c3101f] disabled:opacity-40 text-white font-semibold rounded-lg px-4 py-1.5 text-sm cursor-pointer"
               >
-                Save Transaction
+                {isSubmittingTx ? 'Saving...' : 'Save Transaction'}
               </button>
             </div>
 
@@ -1620,7 +2639,7 @@ export default function App() {
                   <option value="all">All products</option>
                   {products.map((p) => (
                     <option key={p.id} value={String(p.id)}>
-                      {p.name}
+                      {p.productName || p.name}
                     </option>
                   ))}
                 </select>
@@ -1657,26 +2676,16 @@ export default function App() {
                 {[
                   [
                     'Total IN',
-                    sum(
-                      filteredTransactions
-                        .filter((t) => t.type === 'IN')
-                        .map((t) => t.qty)
-                    ),
+                    sum(filteredTransactions.filter((t) => t.type === 'IN').map((t) => t.qty)),
                   ],
                   [
                     'Total OUT',
-                    sum(
-                      filteredTransactions
-                        .filter((t) => t.type === 'OUT')
-                        .map((t) => t.qty)
-                    ),
+                    sum(filteredTransactions.filter((t) => t.type === 'OUT').map((t) => t.qty)),
                   ],
                   [
                     'Net adjustments',
                     sum(
-                      filteredTransactions
-                        .filter((t) => t.type === 'ADJUST')
-                        .map((t) => t.qty)
+                      filteredTransactions.filter((t) => t.type === 'ADJUST').map((t) => t.qty)
                     ),
                   ],
                   ['Transactions', filteredTransactions.length],
@@ -1689,7 +2698,7 @@ export default function App() {
               </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse min-w-[620px] text-sm">
+                <table className="w-full border-collapse min-w-[680px] text-sm">
                   <thead>
                     <tr className="border-b border-[#262626] text-[#9b9b9b] text-xs">
                       <th className="py-2 px-2 text-left font-semibold">ID</th>
@@ -1697,43 +2706,57 @@ export default function App() {
                       <th className="py-2 px-2 text-left font-semibold">Date</th>
                       <th className="py-2 px-2 text-left font-semibold">Type</th>
                       <th className="py-2 px-2 text-right font-semibold">Qty</th>
+                      <th className="py-2 px-2 text-right font-semibold">Resulting Stock</th>
+                      <th className="py-2 px-2 text-left font-semibold">Order Ref</th>
                       <th className="py-2 px-2 text-left font-semibold">Notes</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#262626]">
                     {filteredTransactions
                       .slice((safeInvPage - 1) * 8, safeInvPage * 8)
-                      .map((t) => (
-                        <tr key={t.id} className="hover:bg-[#1a1a1a]">
-                          <td className="py-2.5 px-2 font-mono text-xs text-[#9b9b9b] tabular-nums">
-                            {t.id}
-                          </td>
-                          <td className="py-2.5 px-2 font-medium">
-                            {getProductName(t.pid)}
-                          </td>
-                          <td className="py-2.5 px-2 font-mono text-xs tabular-nums">
-                            {t.date}
-                          </td>
-                          <td className="py-2.5 px-2">
-                            {renderStatusLabel(
-                              t.type,
-                              t.type === 'IN' ? 'g' : t.type === 'OUT' ? 'r' : 'o'
-                            )}
-                          </td>
-                          <td className="py-2.5 px-2 text-right font-mono tabular-nums">
-                            {t.qty > 0 ? `+${t.qty}` : t.qty}
-                          </td>
-                          <td className="py-2.5 px-2 text-[#b5b5b5]">{t.note}</td>
-                        </tr>
-                      ))}
+                      .map((t) => {
+                        const resStock =
+                          t.resultingStock !== undefined
+                            ? t.resultingStock
+                            : computedResultingStockMap[t.id] ?? 0;
+                        return (
+                          <tr key={t.id} className="hover:bg-[#1a1a1a]">
+                            <td className="py-2.5 px-2 font-mono text-xs text-[#9b9b9b] tabular-nums">
+                              #{t.id}
+                            </td>
+                            <td className="py-2.5 px-2 font-medium">
+                              {t.productName || getProductName(t.pid)}
+                              {renderSampleBadge(t.isSample)}
+                            </td>
+                            <td className="py-2.5 px-2 font-mono text-xs tabular-nums">
+                              {t.date}
+                            </td>
+                            <td className="py-2.5 px-2">
+                              {renderStatusLabel(
+                                t.type,
+                                t.type === 'IN' ? 'g' : t.type === 'OUT' ? 'r' : 'o'
+                              )}
+                            </td>
+                            <td className="py-2.5 px-2 text-right font-mono tabular-nums">
+                              {t.qty > 0 ? `+${t.qty}` : t.qty}
+                            </td>
+                            <td className="py-2.5 px-2 text-right font-mono tabular-nums">
+                              {resStock}
+                            </td>
+                            <td className="py-2.5 px-2 font-mono text-xs text-[#9b9b9b]">
+                              {t.relatedOrderId || '-'}
+                            </td>
+                            <td className="py-2.5 px-2 text-xs text-[#b5b5b5]">{t.note}</td>
+                          </tr>
+                        );
+                      })}
                   </tbody>
                 </table>
               </div>
 
               <div className="flex items-center justify-end gap-2.5 mt-3 text-xs">
                 <span className="text-[#9b9b9b] font-mono tabular-nums">
-                  {filteredTransactions.length} records · page {safeInvPage} of{' '}
-                  {invTotalPages}
+                  {filteredTransactions.length} records · page {safeInvPage} of {invTotalPages}
                 </span>
                 <button
                   disabled={safeInvPage <= 1}
@@ -1867,20 +2890,38 @@ export default function App() {
             {forecastEval && (
               <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                  <h2 className="text-[15px] font-semibold">
-                    Demand Forecast (D3.js Baseline Evaluation)
-                  </h2>
-                  <select
-                    value={anaForecastPid}
-                    onChange={(e) => setAnaForecastPid(Number(e.target.value))}
-                    className="bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2]"
-                  >
-                    {products.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} ({p.sku})
-                      </option>
-                    ))}
-                  </select>
+                  <div>
+                    <h2 className="text-[15px] font-semibold">
+                      Demand Forecast (Firestore `forecasts` Collection)
+                    </h2>
+                    {forecastEval.savedDoc && (
+                      <div className="text-[11px] text-[#9b9b9b] font-mono">
+                        Saved in Firestore: {forecastEval.savedDoc.method} · Predicted{' '}
+                        {forecastEval.savedDoc.predictedDailyDemand}/day (14d Total:{' '}
+                        {forecastEval.savedDoc.projectedPeriodTotal} units)
+                        {renderSampleBadge(forecastEval.savedDoc.isSample)}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={anaForecastPid}
+                      onChange={(e) => setAnaForecastPid(Number(e.target.value))}
+                      className="bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 text-sm text-[#f2f2f2]"
+                    >
+                      {products.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.sku})
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={handleSaveForecast}
+                      className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-3 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" /> Save Forecast to Firestore
+                    </button>
+                  </div>
                 </div>
                 <D3ForecastChart
                   histDates={forecastEval.histDates}
@@ -1914,7 +2955,7 @@ export default function App() {
 
             <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
               <h2 className="text-[15px] font-semibold mb-3">
-                Supplier Delivery Performance & Active Purchase Orders
+                Supplier Delivery Performance & Active Purchase Orders (`purchaseOrders` Collection)
               </h2>
               <div className="overflow-x-auto mb-4">
                 <table className="w-full border-collapse min-w-[620px] text-sm">
@@ -1954,15 +2995,16 @@ export default function App() {
               </div>
 
               <h3 className="text-xs font-semibold text-[#9b9b9b] mb-2">
-                Purchase Order Queue (Receive pending POs to credit stock ledger live)
+                Purchase Order Queue (Receive pending POs to credit stock ledger atomically in Firestore)
               </h3>
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse min-w-[620px] text-xs">
+                <table className="w-full border-collapse min-w-[680px] text-xs">
                   <thead>
                     <tr className="border-b border-[#262626] text-[#9b9b9b]">
                       <th className="py-2 px-2 text-left">PO ID</th>
                       <th className="py-2 px-2 text-left">Product</th>
                       <th className="py-2 px-2 text-right">Qty</th>
+                      <th className="py-2 px-2 text-right">Total Value</th>
                       <th className="py-2 px-2 text-left">Order Date</th>
                       <th className="py-2 px-2 text-left">Expected</th>
                       <th className="py-2 px-2 text-left">Status</th>
@@ -1976,10 +3018,18 @@ export default function App() {
                       .slice(0, 8)
                       .map((po) => (
                         <tr key={po.id}>
-                          <td className="py-2 px-2 font-mono">{po.id}</td>
-                          <td className="py-2 px-2">{getProductName(po.pid)}</td>
+                          <td className="py-2 px-2 font-mono">
+                            {po.id}
+                            {renderSampleBadge(po.isSample)}
+                          </td>
+                          <td className="py-2 px-2">
+                            {po.productName || getProductName(po.pid)}
+                          </td>
                           <td className="py-2 px-2 text-right font-mono tabular-nums">
                             {po.qty}
+                          </td>
+                          <td className="py-2 px-2 text-right font-mono tabular-nums">
+                            {po.total !== undefined ? fmtCurr(po.total) : '—'}
                           </td>
                           <td className="py-2 px-2 font-mono">{po.od}</td>
                           <td className="py-2 px-2 font-mono">{po.ex}</td>
@@ -2024,7 +3074,7 @@ export default function App() {
         {activePage === 'rec' && (
           <section className="space-y-4">
             <div className="bg-[#120a0b] border border-[#262626] rounded-lg p-3 text-xs text-[#d8d8d8]">
-              Decision support & automated reporting. Every suggestion shows its mathematical reason so stakeholders can verify it before queuing a purchase order or exporting reports.
+              Decision support & automated reporting. Every suggestion shows its mathematical reason so stakeholders can verify it before queuing a purchase order or saving reports to Firestore.
             </div>
 
             <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
@@ -2038,14 +3088,14 @@ export default function App() {
                   <option value="reorder">Reorder required</option>
                   <option value="stockout">Potential stockout risk</option>
                   <option value="excess">Potential excess stock</option>
-                  <option value="ok">Healthy stock</option>
+                  <option value="ok">In Stock</option>
                 </select>
 
                 <button
                   onClick={handleDownloadCsvFile}
                   className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-3.5 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer"
                 >
-                  <FileSpreadsheet className="w-3.5 h-3.5" /> Download CSV File
+                  <FileSpreadsheet className="w-3.5 h-3.5" /> Download CSV & Save Report
                 </button>
                 <button
                   onClick={() => setCsvModalContent(buildCsvString())}
@@ -2057,7 +3107,7 @@ export default function App() {
                   onClick={handleDownloadJsonReport}
                   className="border border-[#262626] hover:bg-[#1f1f1f] text-[#f2f2f2] rounded-lg px-3 py-1.5 text-xs cursor-pointer"
                 >
-                  Export Stakeholder JSON
+                  Export Stakeholder JSON & Save Report
                 </button>
               </div>
 
@@ -2123,6 +3173,54 @@ export default function App() {
                   </tbody>
                 </table>
               </div>
+            </div>
+
+            {/* Saved Stakeholder Reports History (`reports` Collection) */}
+            <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
+              <h2 className="text-[15px] font-semibold mb-2">
+                Saved Stakeholder Reports History (Firestore `reports` Collection)
+              </h2>
+              {savedReports.length === 0 ? (
+                <div className="text-xs text-[#9b9b9b] py-3">
+                  No saved reports in Firestore yet. Click "Download CSV & Save Report" or "Export Stakeholder JSON & Save Report" above while signed in.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse min-w-[620px] text-xs">
+                    <thead>
+                      <tr className="border-b border-[#262626] text-[#9b9b9b]">
+                        <th className="py-2 px-2 text-left">Report ID</th>
+                        <th className="py-2 px-2 text-left">Type</th>
+                        <th className="py-2 px-2 text-left">Date Range</th>
+                        <th className="py-2 px-2 text-left">Summary</th>
+                        <th className="py-2 px-2 text-left">Generated By</th>
+                        <th className="py-2 px-2 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#262626]">
+                      {savedReports.map((r) => (
+                        <tr key={r.id} className="hover:bg-[#1a1a1a]">
+                          <td className="py-2 px-2 font-mono">{r.id}</td>
+                          <td className="py-2 px-2 font-mono text-[#ff5560]">{r.reportType}</td>
+                          <td className="py-2 px-2 font-mono text-[#9b9b9b]">{r.dateRange}</td>
+                          <td className="py-2 px-2 text-[#f2f2f2]">{r.summary}</td>
+                          <td className="py-2 px-2 font-mono text-[#9b9b9b]">{r.generatedBy}</td>
+                          <td className="py-2 px-2 text-right">
+                            {fbUser && (
+                              <button
+                                onClick={() => deleteReportFromFirestore(activeTenantId, r.id)}
+                                className="text-[#ff5560] hover:underline inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Trash2 className="w-3 h-3" /> Delete
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </section>
         )}
@@ -2411,25 +3509,45 @@ export default function App() {
                 30,
                 60
               );
+              const st = getStockStatus(viewingProduct, transactions);
               const supName =
                 suppliers.find((s) => s.id === viewingProduct.sup)?.name || 'Unknown';
+              const pCost = viewingProduct.purchaseCost ?? viewingProduct.cost;
+              const sPrice =
+                viewingProduct.sellingPrice ?? Math.round(pCost * 1.25);
               return (
                 <>
                   <h2 className="text-base font-semibold mb-2">
-                    {viewingProduct.name}{' '}
-                    <span className="text-[#9b9b9b] font-mono">{viewingProduct.sku}</span>
+                    {viewingProduct.productName || viewingProduct.name}{' '}
+                    <span className="text-[#9b9b9b] font-mono">
+                      ({viewingProduct.sku} · ID:{viewingProduct.productId || viewingProduct.id})
+                    </span>
+                    {renderSampleBadge(viewingProduct.isSample)}
                   </h2>
                   <p className="text-sm text-[#d4d4d4] leading-relaxed mb-3">
+                    Category: {viewingProduct.category || 'General Electronics'} · Warehouse:{' '}
+                    {getWarehouseForProduct(viewingProduct.id)}
+                    <br />
                     Supplier: {supName}
                     <br />
-                    Unit cost {fmtCurr(viewingProduct.cost)} · Lead time{' '}
-                    {viewingProduct.lead} days · Safety stock {viewingProduct.safety} units
+                    Purchase Cost: {fmtCurr(pCost)} · Selling Price: {fmtCurr(sPrice)}
                     <br />
-                    Stock {c.s} units · Inventory value {fmtCurr(c.s * viewingProduct.cost)}
+                    Current Stock: {c.s} {viewingProduct.unit || 'units'} · Low-Stock Threshold:{' '}
+                    {viewingProduct.lowStockThreshold ?? viewingProduct.rop} units · Status:{' '}
+                    {renderStatusLabel(st[0], st[1])}
                     <br />
-                    Avg demand (30 d) {c.a.toFixed(1)} units/day · Calculated ROP {c.rop}{' '}
-                    units
+                    Purchase Value: {fmtCurr(c.s * pCost)} · Potential Selling Value:{' '}
+                    {fmtCurr(c.s * sPrice)}
+                    <br />
+                    Lead time {viewingProduct.lead} days · Safety stock{' '}
+                    {viewingProduct.safety} {viewingProduct.unit || 'units'} · Avg demand (30 d){' '}
+                    {c.a.toFixed(1)} units/day
                   </p>
+                  {viewingProduct.description && (
+                    <p className="text-xs text-[#9b9b9b] mb-3">
+                      {viewingProduct.description}
+                    </p>
+                  )}
                   <p className="text-sm mb-4">
                     {renderStatusLabel(c.risk[0], c.risk[1])} — {c.why}
                   </p>
@@ -2454,12 +3572,29 @@ export default function App() {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="bg-[#141414] border border-[#262626] rounded-xl p-5 w-[480px] max-w-full max-h-[90vh] overflow-auto"
+            className="bg-[#141414] border border-[#262626] rounded-xl p-5 w-[560px] max-w-full max-h-[90vh] overflow-auto"
           >
             <h2 className="text-base font-semibold mb-3">
-              {editingProduct.id ? 'Edit' : 'Add'} Product
+              {editingProduct.id ? 'Edit' : 'Add'} Product (Saves to Firestore `products` & `inventory`)
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">
+                  Product ID (`productId` / Document ID) *
+                </label>
+                <input
+                  value={editingProduct.productId}
+                  disabled={editingProduct.id > 0}
+                  onChange={(e) =>
+                    setEditingProduct({
+                      ...editingProduct,
+                      productId: e.target.value.toUpperCase(),
+                    })
+                  }
+                  placeholder="e.g. PROD011"
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono disabled:opacity-60"
+                />
+              </div>
               <div>
                 <label className="block text-xs text-[#9b9b9b] mb-1">SKU</label>
                 <input
@@ -2467,28 +3602,123 @@ export default function App() {
                   onChange={(e) =>
                     setEditingProduct({ ...editingProduct, sku: e.target.value })
                   }
+                  placeholder="e.g. LAP-002"
                   className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
                 />
               </div>
               <div>
-                <label className="block text-xs text-[#9b9b9b] mb-1">Product name</label>
+                <label className="block text-xs text-[#9b9b9b] mb-1">
+                  Product Name *
+                </label>
                 <input
                   value={editingProduct.name}
                   onChange={(e) =>
                     setEditingProduct({ ...editingProduct, name: e.target.value })
                   }
+                  placeholder="e.g. Workstation Laptop"
                   className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5"
                 />
               </div>
               <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">Category *</label>
+                <input
+                  list="product-categories-list"
+                  value={editingProduct.category}
+                  onChange={(e) =>
+                    setEditingProduct({ ...editingProduct, category: e.target.value })
+                  }
+                  placeholder="Select or type category"
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5"
+                />
+                <datalist id="product-categories-list">
+                  {availableCategories.map((cat) => (
+                    <option key={cat} value={cat} />
+                  ))}
+                </datalist>
+              </div>
+              <div>
                 <label className="block text-xs text-[#9b9b9b] mb-1">
-                  Unit cost ({currencySymbol} per unit)
+                  Warehouse Location (`inventory`)
+                </label>
+                <input
+                  value={editingProduct.warehouseLocation}
+                  onChange={(e) =>
+                    setEditingProduct({
+                      ...editingProduct,
+                      warehouseLocation: e.target.value,
+                    })
+                  }
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">
+                  Purchase Cost ({currencySymbol}) *
                 </label>
                 <input
                   type="number"
+                  min={0}
                   value={editingProduct.cost}
+                  onChange={(e) => {
+                    const nextCost = e.target.value;
+                    const autoSell =
+                      editingProduct.sellingPrice === '' && nextCost !== '' && !isNaN(+nextCost)
+                        ? String(Math.round(+nextCost * 1.25))
+                        : editingProduct.sellingPrice;
+                    setEditingProduct({
+                      ...editingProduct,
+                      cost: nextCost,
+                      sellingPrice: autoSell,
+                    });
+                  }}
+                  placeholder="e.g. 12000"
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">
+                  Selling Price ({currencySymbol}) *
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={editingProduct.sellingPrice}
                   onChange={(e) =>
-                    setEditingProduct({ ...editingProduct, cost: e.target.value })
+                    setEditingProduct({
+                      ...editingProduct,
+                      sellingPrice: e.target.value,
+                    })
+                  }
+                  placeholder="e.g. 15500"
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">
+                  Current Stock (units) *
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  value={editingProduct.stock}
+                  onChange={(e) =>
+                    setEditingProduct({ ...editingProduct, stock: e.target.value })
+                  }
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">
+                  Low-Stock Threshold / ROP (units) *
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  value={editingProduct.rop}
+                  onChange={(e) =>
+                    setEditingProduct({ ...editingProduct, rop: e.target.value })
                   }
                   className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
                 />
@@ -2499,35 +3729,10 @@ export default function App() {
                 </label>
                 <input
                   type="number"
+                  min={0}
                   value={editingProduct.lead}
                   onChange={(e) =>
                     setEditingProduct({ ...editingProduct, lead: e.target.value })
-                  }
-                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-[#9b9b9b] mb-1">
-                  Reorder point (units)
-                </label>
-                <input
-                  type="number"
-                  value={editingProduct.rop}
-                  onChange={(e) =>
-                    setEditingProduct({ ...editingProduct, rop: e.target.value })
-                  }
-                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-[#9b9b9b] mb-1">
-                  Current stock (units)
-                </label>
-                <input
-                  type="number"
-                  value={editingProduct.stock}
-                  onChange={(e) =>
-                    setEditingProduct({ ...editingProduct, stock: e.target.value })
                   }
                   className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
                 />
@@ -2538,6 +3743,7 @@ export default function App() {
                 </label>
                 <input
                   type="number"
+                  min={0}
                   value={editingProduct.safe}
                   onChange={(e) =>
                     setEditingProduct({ ...editingProduct, safe: e.target.value })
@@ -2564,7 +3770,48 @@ export default function App() {
                   ))}
                 </select>
               </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">Unit</label>
+                <input
+                  value={editingProduct.unit}
+                  onChange={(e) =>
+                    setEditingProduct({ ...editingProduct, unit: e.target.value })
+                  }
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs text-[#9b9b9b] mb-1">Description</label>
+                <input
+                  value={editingProduct.description}
+                  onChange={(e) =>
+                    setEditingProduct({
+                      ...editingProduct,
+                      description: e.target.value,
+                    })
+                  }
+                  placeholder="Product specification or SKU notes"
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5"
+                />
+              </div>
             </div>
+
+            {/* Live Automatic Stock Status Preview */}
+            {(() => {
+              const sVal = Math.max(0, Number(editingProduct.stock) || 0);
+              const tVal = Math.max(0, Number(editingProduct.rop) || 0);
+              const autoLabel = computeStockStatusLabel(sVal, tVal);
+              const color =
+                autoLabel === 'Out of Stock' ? 'r' : autoLabel === 'Low Stock' ? 'o' : 'g';
+              return (
+                <div className="mt-3 bg-[#0d0d0d] border border-[#262626] rounded-lg p-2.5 text-xs flex items-center justify-between">
+                  <span className="text-[#9b9b9b]">
+                    Automatically Calculated <code className="font-mono">stockStatus</code> (enforced by Firestore rules):
+                  </span>
+                  {renderStatusLabel(autoLabel, color)}
+                </div>
+              );
+            })()}
 
             {editingProduct.errors.length > 0 && (
               <div className="text-xs text-[#ff5560] my-2.5 space-y-1">
@@ -2579,10 +3826,114 @@ export default function App() {
                 onClick={handleSaveProduct}
                 className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-4 py-1.5 text-sm cursor-pointer"
               >
-                Save
+                Save to Firestore
               </button>
               <button
                 onClick={() => setEditingProduct(null)}
+                className="border border-[#262626] hover:bg-[#1f1f1f] text-[#f2f2f2] rounded-lg px-4 py-1.5 text-sm cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Supplier Add/Edit Modal */}
+      {editingSupplier && (
+        <div
+          onClick={() => setEditingSupplier(null)}
+          className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-30"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-[#141414] border border-[#262626] rounded-xl p-5 w-[480px] max-w-full"
+          >
+            <h2 className="text-base font-semibold mb-3">
+              {editingSupplier.id ? 'Edit' : 'Add'} Supplier (Firestore `suppliers`)
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="sm:col-span-2">
+                <label className="block text-xs text-[#9b9b9b] mb-1">Supplier Name</label>
+                <input
+                  value={editingSupplier.name}
+                  onChange={(e) =>
+                    setEditingSupplier({ ...editingSupplier, name: e.target.value })
+                  }
+                  placeholder="e.g. Global Chipset Logistics"
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">Contact Person</label>
+                <input
+                  value={editingSupplier.contactPerson}
+                  onChange={(e) =>
+                    setEditingSupplier({
+                      ...editingSupplier,
+                      contactPerson: e.target.value,
+                    })
+                  }
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">Status</label>
+                <select
+                  value={editingSupplier.status}
+                  onChange={(e) =>
+                    setEditingSupplier({
+                      ...editingSupplier,
+                      status: e.target.value as 'ACTIVE' | 'ON_HOLD' | 'INACTIVE',
+                    })
+                  }
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5"
+                >
+                  <option value="ACTIVE">ACTIVE</option>
+                  <option value="ON_HOLD">ON_HOLD</option>
+                  <option value="INACTIVE">INACTIVE</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">Email</label>
+                <input
+                  value={editingSupplier.email}
+                  onChange={(e) =>
+                    setEditingSupplier({ ...editingSupplier, email: e.target.value })
+                  }
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9b9b9b] mb-1">Phone</label>
+                <input
+                  value={editingSupplier.phone}
+                  onChange={(e) =>
+                    setEditingSupplier({ ...editingSupplier, phone: e.target.value })
+                  }
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5 font-mono"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs text-[#9b9b9b] mb-1">Address</label>
+                <input
+                  value={editingSupplier.address}
+                  onChange={(e) =>
+                    setEditingSupplier({ ...editingSupplier, address: e.target.value })
+                  }
+                  className="w-full bg-[#0d0d0d] border border-[#262626] rounded-lg px-2.5 py-1.5"
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-2 mt-4">
+              <button
+                onClick={handleSaveSupplier}
+                className="bg-[#e11d2e] hover:bg-[#c3101f] text-white font-semibold rounded-lg px-4 py-1.5 text-sm cursor-pointer"
+              >
+                Save Supplier
+              </button>
+              <button
+                onClick={() => setEditingSupplier(null)}
                 className="border border-[#262626] hover:bg-[#1f1f1f] text-[#f2f2f2] rounded-lg px-4 py-1.5 text-sm cursor-pointer"
               >
                 Cancel
@@ -2602,10 +3953,10 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
             className="bg-[#141414] border border-[#262626] rounded-xl p-5 w-[440px] max-w-full"
           >
-            <h2 className="text-base font-semibold mb-2">Delete product?</h2>
+            <h2 className="text-base font-semibold mb-2">Delete product from Firestore?</h2>
             <p className="text-sm text-[#b5b5b5] mb-4">
-              This removes <b className="text-[#f2f2f2]">{deletingProduct.name}</b> and its
-              stock transactions. This cannot be undone.
+              This removes <b className="text-[#f2f2f2]">{deletingProduct.name}</b>, its
+              inventory balance record, forecast, and stock transactions. This cannot be undone.
             </p>
             <div className="flex items-center gap-2">
               <button

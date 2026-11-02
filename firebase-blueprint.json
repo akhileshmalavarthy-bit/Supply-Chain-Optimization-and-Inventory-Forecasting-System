@@ -27,7 +27,7 @@
     },
     "UserProfileDoc": {
       "title": "UserProfileDoc",
-      "description": "User workspace profile isolated from raw PII.",
+      "description": "Private user profile with display name, email, role, and active tenant.",
       "type": "object",
       "properties": {
         "uid": {
@@ -41,6 +41,12 @@
           "minLength": 1,
           "maxLength": 80,
           "description": "Display name"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120,
+          "description": "Authenticated user email (restricted to owner/admin)"
         },
         "role": {
           "type": "string",
@@ -65,7 +71,7 @@
           "description": "Last update server timestamp"
         }
       },
-      "required": ["uid", "name", "role", "activeTenantId", "createdAt", "updatedAt"]
+      "required": ["uid", "name", "email", "role", "activeTenantId", "createdAt", "updatedAt"]
     },
     "TenantWorkspaceDoc": {
       "title": "TenantWorkspaceDoc",
@@ -115,6 +121,12 @@
           "maxLength": 16,
           "description": "Locale string for number formatting"
         },
+        "status": {
+          "type": "string",
+          "enum": ["ACTIVE", "MAINTENANCE"],
+          "maxLength": 16,
+          "description": "Workspace operational status"
+        },
         "today": {
           "type": "string",
           "minLength": 10,
@@ -140,6 +152,7 @@
         "region",
         "currencySymbol",
         "currencyLocale",
+        "status",
         "today",
         "createdAt",
         "updatedAt"
@@ -147,157 +160,158 @@
     },
     "ProductDoc": {
       "title": "ProductDoc",
-      "description": "Product SKU record inside a tenant workspace.",
+      "description": "Product SKU catalogue and real-time stock record inside a tenant workspace.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "number",
-          "description": "Numeric product ID"
+        "id": { "type": "number", "description": "Numeric product ID" },
+        "productId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique document/product ID"
         },
         "tenantId": {
           "type": "string",
           "maxLength": 64,
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "description": "Parent tenant ID"
-        },
-        "ownerId": {
-          "type": "string",
-          "maxLength": 128,
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "description": "Owner UID"
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "sku": {
           "type": "string",
           "minLength": 3,
           "maxLength": 20,
-          "pattern": "^[A-Za-z0-9\\-]+$",
-          "description": "Unique product SKU"
+          "pattern": "^[A-Za-z0-9\\-]+$"
         },
-        "name": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "description": { "type": "string", "maxLength": 200 },
+        "unit": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "cost": { "type": "number" },
+        "purchaseCost": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "currentStock": { "type": "number" },
+        "lowStockThreshold": { "type": "number" },
+        "stockStatus": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 60,
-          "description": "Product name"
+          "enum": ["In Stock", "Low Stock", "Out of Stock"],
+          "maxLength": 20
         },
-        "cost": {
-          "type": "number",
-          "description": "Unit cost (>= 0)"
-        },
-        "lead": {
-          "type": "number",
-          "description": "Lead time in days (0-365)"
-        },
-        "opening": {
-          "type": "number",
-          "description": "Opening stock balance"
-        },
-        "safety": {
-          "type": "number",
-          "description": "Safety stock units"
-        },
-        "rop": {
-          "type": "number",
-          "description": "Reorder point units"
-        },
-        "base": {
-          "type": "number",
-          "description": "Baseline daily demand parameter"
-        },
-        "sup": {
-          "type": "number",
-          "description": "Supplier numeric ID"
-        },
-        "createdAt": {
+        "status": {
           "type": "string",
-          "format": "date-time",
-          "description": "Creation server timestamp"
+          "enum": ["ACTIVE", "DISCONTINUED"]
         },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Last update server timestamp"
-        }
+        "lead": { "type": "number" },
+        "opening": { "type": "number" },
+        "safety": { "type": "number" },
+        "rop": { "type": "number" },
+        "base": { "type": "number" },
+        "sup": { "type": "number" },
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "id",
+        "productId",
         "tenantId",
-        "ownerId",
         "sku",
         "name",
+        "productName",
+        "category",
+        "description",
+        "unit",
         "cost",
+        "purchaseCost",
+        "sellingPrice",
+        "currentStock",
+        "lowStockThreshold",
+        "stockStatus",
+        "status",
         "lead",
         "opening",
         "safety",
         "rop",
         "base",
         "sup",
+        "isSample",
         "createdAt",
         "updatedAt"
       ]
     },
-    "TransactionDoc": {
-      "title": "TransactionDoc",
-      "description": "Immutable stock ledger transaction entry inside a tenant workspace.",
+    "InventoryDoc": {
+      "title": "InventoryDoc",
+      "description": "Real-time inventory stock balance and warehouse location per product.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "number",
-          "description": "Numeric transaction ID"
-        },
+        "productId": { "type": "number" },
         "tenantId": {
           "type": "string",
           "maxLength": 64,
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "description": "Parent tenant ID"
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
-        "ownerId": {
+        "sku": { "type": "string", "minLength": 3, "maxLength": 20 },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "quantityOnHand": { "type": "number" },
+        "reorderLevel": { "type": "number" },
+        "safetyStock": { "type": "number" },
+        "warehouseLocation": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "status": {
           "type": "string",
-          "maxLength": 128,
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "description": "Creator UID"
+          "enum": ["In Stock", "Healthy Stock", "Low Stock", "Out of Stock"]
         },
-        "pid": {
-          "type": "number",
-          "description": "Target product ID"
-        },
-        "date": {
+        "isSample": { "type": "boolean" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "productId",
+        "tenantId",
+        "sku",
+        "productName",
+        "quantityOnHand",
+        "reorderLevel",
+        "safetyStock",
+        "warehouseLocation",
+        "status",
+        "isSample",
+        "lastUpdated"
+      ]
+    },
+    "SupplierDoc": {
+      "title": "SupplierDoc",
+      "description": "Supplier directory record inside a tenant workspace.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "number" },
+        "tenantId": {
           "type": "string",
-          "minLength": 10,
-          "maxLength": 10,
-          "description": "Transaction date YYYY-MM-DD"
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
-        "type": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "contactPerson": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 100 },
+        "phone": { "type": "string", "minLength": 3, "maxLength": 30 },
+        "address": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "status": {
           "type": "string",
-          "enum": ["IN", "OUT", "ADJUST"],
-          "maxLength": 10,
-          "description": "Ledger operation type"
+          "enum": ["ACTIVE", "ON_HOLD", "INACTIVE"]
         },
-        "qty": {
-          "type": "number",
-          "description": "Signed quantity delta"
-        },
-        "note": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 120,
-          "description": "Transaction note"
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Creation server timestamp"
-        }
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "id",
         "tenantId",
-        "ownerId",
-        "pid",
-        "date",
-        "type",
-        "qty",
-        "note",
-        "createdAt"
+        "name",
+        "contactPerson",
+        "email",
+        "phone",
+        "address",
+        "status",
+        "isSample",
+        "createdAt",
+        "updatedAt"
       ]
     },
     "PurchaseOrderDoc": {
@@ -308,80 +322,204 @@
         "id": {
           "type": "string",
           "maxLength": 32,
-          "pattern": "^[A-Za-z0-9\\-]+$",
-          "description": "PO identifier e.g. PO-1001"
+          "pattern": "^[A-Za-z0-9\\-]+$"
         },
         "tenantId": {
           "type": "string",
           "maxLength": 64,
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "description": "Parent tenant ID"
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
-        "ownerId": {
-          "type": "string",
-          "maxLength": 128,
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "description": "Creator UID"
-        },
-        "sup": {
-          "type": "number",
-          "description": "Supplier numeric ID"
-        },
-        "pid": {
-          "type": "number",
-          "description": "Product numeric ID"
-        },
-        "qty": {
-          "type": "number",
-          "description": "Ordered quantity (> 0)"
-        },
-        "od": {
-          "type": "string",
-          "minLength": 10,
-          "maxLength": 10,
-          "description": "Order date YYYY-MM-DD"
-        },
-        "ex": {
-          "type": "string",
-          "minLength": 10,
-          "maxLength": 10,
-          "description": "Expected receipt date YYYY-MM-DD"
-        },
-        "rc": {
-          "type": "string",
-          "maxLength": 10,
-          "description": "Actual receipt date YYYY-MM-DD or empty string"
-        },
+        "sup": { "type": "number" },
+        "pid": { "type": "number" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "qty": { "type": "number" },
+        "unitPrice": { "type": "number" },
+        "total": { "type": "number" },
+        "od": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "ex": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "rc": { "type": "string", "maxLength": 10 },
         "st": {
           "type": "string",
-          "enum": ["pending", "received", "cancelled"],
-          "maxLength": 16,
-          "description": "PO status"
+          "enum": ["pending", "received", "cancelled"]
         },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Creation server timestamp"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Last update server timestamp"
-        }
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "id",
         "tenantId",
-        "ownerId",
         "sup",
         "pid",
+        "productName",
         "qty",
+        "unitPrice",
+        "total",
         "od",
         "ex",
         "rc",
         "st",
+        "isSample",
         "createdAt",
         "updatedAt"
+      ]
+    },
+    "InventoryTransactionDoc": {
+      "title": "InventoryTransactionDoc",
+      "description": "Immutable stock movement & ledger transaction entry inside a tenant workspace.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "number" },
+        "tenantId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "pid": { "type": "number" },
+        "productId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "date": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "type": {
+          "type": "string",
+          "enum": ["IN", "OUT", "ADJUST"]
+        },
+        "transactionType": {
+          "type": "string",
+          "enum": ["PURCHASE", "SALE", "ADJUST"]
+        },
+        "qty": { "type": "number" },
+        "quantity": { "type": "number" },
+        "resultingStock": { "type": "number" },
+        "note": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "relatedOrderId": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "actorEmail": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "isSample": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "pid",
+        "productId",
+        "productName",
+        "date",
+        "type",
+        "transactionType",
+        "qty",
+        "quantity",
+        "resultingStock",
+        "note",
+        "relatedOrderId",
+        "actorEmail",
+        "isSample",
+        "createdAt"
+      ]
+    },
+    "ForecastDoc": {
+      "title": "ForecastDoc",
+      "description": "Demand forecast record and historical demand series per product.",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "number" },
+        "tenantId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sku": { "type": "string", "minLength": 3, "maxLength": 20 },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "forecastPeriod": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "windowDays": { "type": "number" },
+        "historySeries": { "type": "array" },
+        "predictedDailyDemand": { "type": "number" },
+        "projectedPeriodTotal": { "type": "number" },
+        "method": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "maeMean": { "type": "number" },
+        "maeNaive": { "type": "number" },
+        "isSample": { "type": "boolean" },
+        "generatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "productId",
+        "tenantId",
+        "sku",
+        "productName",
+        "forecastPeriod",
+        "windowDays",
+        "historySeries",
+        "predictedDailyDemand",
+        "projectedPeriodTotal",
+        "method",
+        "maeMean",
+        "maeNaive",
+        "isSample",
+        "generatedAt"
+      ]
+    },
+    "NotificationDoc": {
+      "title": "NotificationDoc",
+      "description": "Real-time alert notification for stockouts, low stock, or PO events.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "type": {
+          "type": "string",
+          "enum": ["LOW_STOCK", "OUT_OF_STOCK", "PO_UPDATE", "SYSTEM"]
+        },
+        "relatedRecordId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "userId",
+        "message",
+        "type",
+        "relatedRecordId",
+        "read",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ReportDoc": {
+      "title": "ReportDoc",
+      "description": "Saved stakeholder report metadata and summary metrics.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reportType": {
+          "type": "string",
+          "enum": ["CSV_RECOMMENDATIONS", "JSON_EXECUTIVE_SUMMARY"]
+        },
+        "dateRange": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "totalProducts": { "type": "number" },
+        "inventoryValue": { "type": "number" },
+        "belowRopCount": { "type": "number" },
+        "generatedBy": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "generatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "reportType",
+        "dateRange",
+        "summary",
+        "totalProducts",
+        "inventoryValue",
+        "belowRopCount",
+        "generatedBy",
+        "generatedAt"
       ]
     },
     "AuditLogDoc": {
@@ -389,69 +527,34 @@
       "description": "Immutable security and administrative audit log record.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "number",
-          "description": "Numeric sequence ID"
-        },
+        "id": { "type": "number" },
         "tenantId": {
           "type": "string",
           "maxLength": 64,
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "description": "Parent tenant ID"
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
-        "ownerId": {
-          "type": "string",
-          "maxLength": 128,
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "description": "Actor UID"
-        },
-        "k": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 40,
-          "description": "Audit category"
-        },
-        "m": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200,
-          "description": "Audit action message"
-        },
-        "d": {
-          "type": "string",
-          "minLength": 10,
-          "maxLength": 10,
-          "description": "Date string YYYY-MM-DD"
-        },
+        "k": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "m": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "d": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "actorEmail": { "type": "string", "minLength": 3, "maxLength": 120 },
         "actorRole": {
           "type": "string",
-          "enum": ["SUPER_ADMIN", "OPS_MANAGER", "INVENTORY_ANALYST", "AUDITOR"],
-          "maxLength": 32,
-          "description": "Role at time of action"
+          "enum": ["SUPER_ADMIN", "OPS_MANAGER", "INVENTORY_ANALYST", "AUDITOR"]
         },
         "severity": {
           "type": "string",
-          "enum": ["INFO", "WARN", "CRITICAL"],
-          "maxLength": 16,
-          "description": "Log severity"
+          "enum": ["INFO", "WARN", "CRITICAL"]
         },
-        "n": {
-          "type": "number",
-          "description": "Monotonic sequence number"
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Creation server timestamp"
-        }
+        "n": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "id",
         "tenantId",
-        "ownerId",
         "k",
         "m",
         "d",
+        "actorEmail",
         "actorRole",
         "severity",
         "n",
@@ -466,7 +569,11 @@
     },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfileDoc" },
-      "description": "User workspace profiles."
+      "description": "Private user profiles with role and active tenant."
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/ProductDoc" },
+      "description": "Top-level products collection where each document ID is the unique productId (e.g. PROD001)."
     },
     "/tenants/{tenantId}": {
       "schema": { "$ref": "#/entities/TenantWorkspaceDoc" },
@@ -476,13 +583,33 @@
       "schema": { "$ref": "#/entities/ProductDoc" },
       "description": "Products in a tenant workspace."
     },
-    "/tenants/{tenantId}/transactions/{transactionId}": {
-      "schema": { "$ref": "#/entities/TransactionDoc" },
-      "description": "Inventory ledger transactions in a tenant workspace."
+    "/tenants/{tenantId}/inventory/{productId}": {
+      "schema": { "$ref": "#/entities/InventoryDoc" },
+      "description": "Real-time inventory stock records per product."
+    },
+    "/tenants/{tenantId}/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/SupplierDoc" },
+      "description": "Suppliers in a tenant workspace."
     },
     "/tenants/{tenantId}/purchaseOrders/{poId}": {
       "schema": { "$ref": "#/entities/PurchaseOrderDoc" },
       "description": "Supplier purchase orders in a tenant workspace."
+    },
+    "/tenants/{tenantId}/inventoryTransactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/InventoryTransactionDoc" },
+      "description": "Inventory ledger transactions in a tenant workspace."
+    },
+    "/tenants/{tenantId}/forecasts/{productId}": {
+      "schema": { "$ref": "#/entities/ForecastDoc" },
+      "description": "Demand forecasts and historical demand inputs per product."
+    },
+    "/tenants/{tenantId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/NotificationDoc" },
+      "description": "Stock and order notifications in a tenant workspace."
+    },
+    "/tenants/{tenantId}/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/ReportDoc" },
+      "description": "Saved stakeholder reports in a tenant workspace."
     },
     "/tenants/{tenantId}/auditLogs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLogDoc" },

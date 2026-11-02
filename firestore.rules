@@ -7,7 +7,7 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // 2. Hardened Primitives
+    // 2. Hardened Primitives & RBAC Helpers
     function isSignedIn() {
       return request.auth != null && request.auth.token.email_verified == true;
     }
@@ -31,9 +31,45 @@ service cloud.firestore {
       );
     }
 
-    function isTenantMasterOwner(tenantId) {
-      return exists(/databases/$(database)/documents/tenants/$(tenantId)) &&
+    function tenantExists(tenantId) {
+      return exists(/databases/$(database)/documents/tenants/$(tenantId));
+    }
+
+    function isTenantOwner(tenantId) {
+      return tenantExists(tenantId) &&
         get(/databases/$(database)/documents/tenants/$(tenantId)).data.ownerId == request.auth.uid;
+    }
+
+    function getUserRole() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+        : 'INVENTORY_ANALYST';
+    }
+
+    function canReadCompanyData(tenantId) {
+      return isAdmin() || tenantExists(tenantId);
+    }
+
+    function canManageCatalog(tenantId) {
+      return isAdmin() || isTenantOwner(tenantId) || (
+        tenantExists(tenantId) && (getUserRole() == 'SUPER_ADMIN' || getUserRole() == 'OPS_MANAGER')
+      );
+    }
+
+    function canDeleteCatalog(tenantId) {
+      return isAdmin() || isTenantOwner(tenantId) || (
+        tenantExists(tenantId) && getUserRole() == 'SUPER_ADMIN'
+      );
+    }
+
+    function canManageInventory(tenantId) {
+      return isAdmin() || isTenantOwner(tenantId) || (
+        tenantExists(tenantId) && (
+          getUserRole() == 'SUPER_ADMIN' ||
+          getUserRole() == 'OPS_MANAGER' ||
+          getUserRole() == 'INVENTORY_ANALYST'
+        )
+      );
     }
 
     // 3. Entity Blueprint Validation Helpers
@@ -46,11 +82,12 @@ service cloud.firestore {
     }
 
     function isValidUserProfileDoc(data) {
-      return data.keys().hasAll(['uid', 'name', 'role', 'activeTenantId', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'name', 'role', 'activeTenantId', 'createdAt', 'updatedAt']) &&
+      return data.keys().hasAll(['uid', 'name', 'email', 'role', 'activeTenantId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'name', 'email', 'role', 'activeTenantId', 'createdAt', 'updatedAt']) &&
         data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.uid == request.auth.uid &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 120 &&
         data.role is string && data.role.size() <= 32 &&
         (data.role == 'SUPER_ADMIN' || data.role == 'OPS_MANAGER' || data.role == 'INVENTORY_ANALYST' || data.role == 'AUDITOR') &&
         data.activeTenantId is string && data.activeTenantId.size() >= 1 && data.activeTenantId.size() <= 64 && data.activeTenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
@@ -59,8 +96,8 @@ service cloud.firestore {
     }
 
     function isValidTenantWorkspaceDoc(data) {
-      return data.keys().hasAll(['id', 'ownerId', 'name', 'code', 'region', 'currencySymbol', 'currencyLocale', 'today', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['id', 'ownerId', 'name', 'code', 'region', 'currencySymbol', 'currencyLocale', 'today', 'createdAt', 'updatedAt']) &&
+      return data.keys().hasAll(['id', 'ownerId', 'name', 'code', 'region', 'currencySymbol', 'currencyLocale', 'status', 'today', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerId', 'name', 'code', 'region', 'currencySymbol', 'currencyLocale', 'status', 'today', 'createdAt', 'updatedAt']) &&
         data.id is string && data.id.size() >= 1 && data.id.size() <= 64 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.ownerId == request.auth.uid &&
@@ -69,74 +106,180 @@ service cloud.firestore {
         data.region is string && data.region.size() >= 1 && data.region.size() <= 60 &&
         data.currencySymbol is string && data.currencySymbol.size() >= 1 && data.currencySymbol.size() <= 5 &&
         data.currencyLocale is string && data.currencyLocale.size() >= 2 && data.currencyLocale.size() <= 16 &&
+        data.status is string && data.status.size() <= 16 && (data.status == 'ACTIVE' || data.status == 'MAINTENANCE') &&
         data.today is string && data.today.size() == 10 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
 
     function isValidProductDoc(data) {
-      return data.keys().hasAll(['id', 'tenantId', 'ownerId', 'sku', 'name', 'cost', 'lead', 'opening', 'safety', 'rop', 'base', 'sup', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['id', 'tenantId', 'ownerId', 'sku', 'name', 'cost', 'lead', 'opening', 'safety', 'rop', 'base', 'sup', 'createdAt', 'updatedAt']) &&
+      return data.keys().hasAll(['id', 'productId', 'tenantId', 'sku', 'name', 'productName', 'category', 'description', 'unit', 'cost', 'purchaseCost', 'sellingPrice', 'currentStock', 'lowStockThreshold', 'stockStatus', 'status', 'lead', 'opening', 'safety', 'rop', 'base', 'sup', 'isSample', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'productId', 'tenantId', 'sku', 'name', 'productName', 'category', 'description', 'unit', 'cost', 'purchaseCost', 'sellingPrice', 'currentStock', 'lowStockThreshold', 'stockStatus', 'status', 'lead', 'opening', 'safety', 'rop', 'base', 'sup', 'isSample', 'createdAt', 'updatedAt']) &&
         data.id is number && data.id >= 1 &&
+        data.productId is string && data.productId.size() >= 1 && data.productId.size() <= 64 && data.productId.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.ownerId == request.auth.uid &&
         data.sku is string && data.sku.size() >= 3 && data.sku.size() <= 20 && data.sku.matches('^[A-Za-z0-9\\-]+$') &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 60 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+        data.description is string && data.description.size() <= 200 &&
+        data.unit is string && data.unit.size() >= 1 && data.unit.size() <= 20 &&
         data.cost is number && data.cost >= 0 &&
+        data.purchaseCost is number && data.purchaseCost >= 0 &&
+        data.sellingPrice is number && data.sellingPrice >= 0 &&
+        data.currentStock is number && data.currentStock >= 0 && data.currentStock <= 10000000 &&
+        data.lowStockThreshold is number && data.lowStockThreshold >= 0 && data.lowStockThreshold <= 1000000 &&
+        data.stockStatus is string && data.stockStatus.size() <= 20 &&
+        (data.stockStatus == 'In Stock' || data.stockStatus == 'Low Stock' || data.stockStatus == 'Out of Stock') &&
+        ((data.currentStock == 0 && data.stockStatus == 'Out of Stock') ||
+         (data.currentStock > 0 && data.currentStock <= data.lowStockThreshold && data.stockStatus == 'Low Stock') ||
+         (data.currentStock > data.lowStockThreshold && data.stockStatus == 'In Stock')) &&
+        data.status is string && data.status.size() <= 20 && (data.status == 'ACTIVE' || data.status == 'DISCONTINUED') &&
         data.lead is number && data.lead >= 0 && data.lead <= 365 &&
         data.opening is number && data.opening >= 0 && data.opening <= 10000000 &&
         data.safety is number && data.safety >= 0 && data.safety <= 1000000 &&
         data.rop is number && data.rop >= 0 && data.rop <= 1000000 &&
         data.base is number && data.base >= 0 &&
         data.sup is number && data.sup >= 1 &&
+        data.isSample is bool &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
 
-    function isValidTransactionDoc(data) {
-      return data.keys().hasAll(['id', 'tenantId', 'ownerId', 'pid', 'date', 'type', 'qty', 'note', 'createdAt']) &&
-        data.keys().hasOnly(['id', 'tenantId', 'ownerId', 'pid', 'date', 'type', 'qty', 'note', 'createdAt']) &&
+    function isValidInventoryDoc(data) {
+      return data.keys().hasAll(['productId', 'tenantId', 'sku', 'productName', 'quantityOnHand', 'reorderLevel', 'safetyStock', 'warehouseLocation', 'status', 'isSample', 'lastUpdated']) &&
+        data.keys().hasOnly(['productId', 'tenantId', 'sku', 'productName', 'quantityOnHand', 'reorderLevel', 'safetyStock', 'warehouseLocation', 'status', 'isSample', 'lastUpdated']) &&
+        data.productId is number && data.productId >= 1 &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.sku is string && data.sku.size() >= 3 && data.sku.size() <= 20 &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 60 &&
+        data.quantityOnHand is number && data.quantityOnHand >= 0 &&
+        data.reorderLevel is number && data.reorderLevel >= 0 &&
+        data.safetyStock is number && data.safetyStock >= 0 &&
+        data.warehouseLocation is string && data.warehouseLocation.size() >= 1 && data.warehouseLocation.size() <= 60 &&
+        data.status is string && data.status.size() <= 20 &&
+        (data.status == 'In Stock' || data.status == 'Healthy Stock' || data.status == 'Low Stock' || data.status == 'Out of Stock') &&
+        data.isSample is bool &&
+        data.lastUpdated is timestamp;
+    }
+
+    function isValidSupplierDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'name', 'contactPerson', 'email', 'phone', 'address', 'status', 'isSample', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'name', 'contactPerson', 'email', 'phone', 'address', 'status', 'isSample', 'createdAt', 'updatedAt']) &&
         data.id is number && data.id >= 1 &&
         data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.ownerId == request.auth.uid &&
-        data.pid is number && data.pid >= 1 &&
-        data.date is string && data.date.size() == 10 &&
-        data.type is string && data.type.size() <= 10 && (data.type == 'IN' || data.type == 'OUT' || data.type == 'ADJUST') &&
-        data.qty is number && data.qty != 0 &&
-        data.note is string && data.note.size() >= 1 && data.note.size() <= 120 &&
-        data.createdAt is timestamp;
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.contactPerson is string && data.contactPerson.size() >= 1 && data.contactPerson.size() <= 60 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 100 &&
+        data.phone is string && data.phone.size() >= 3 && data.phone.size() <= 30 &&
+        data.address is string && data.address.size() >= 1 && data.address.size() <= 150 &&
+        data.status is string && data.status.size() <= 16 && (data.status == 'ACTIVE' || data.status == 'ON_HOLD' || data.status == 'INACTIVE') &&
+        data.isSample is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
     }
 
     function isValidPurchaseOrderDoc(data) {
-      return data.keys().hasAll(['id', 'tenantId', 'ownerId', 'sup', 'pid', 'qty', 'od', 'ex', 'rc', 'st', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['id', 'tenantId', 'ownerId', 'sup', 'pid', 'qty', 'od', 'ex', 'rc', 'st', 'createdAt', 'updatedAt']) &&
+      return data.keys().hasAll(['id', 'tenantId', 'sup', 'pid', 'productName', 'qty', 'unitPrice', 'total', 'od', 'ex', 'rc', 'st', 'isSample', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'sup', 'pid', 'productName', 'qty', 'unitPrice', 'total', 'od', 'ex', 'rc', 'st', 'isSample', 'createdAt', 'updatedAt']) &&
         data.id is string && data.id.size() >= 3 && data.id.size() <= 32 && data.id.matches('^[A-Za-z0-9\\-]+$') &&
         data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.ownerId == request.auth.uid &&
         data.sup is number && data.sup >= 1 &&
         data.pid is number && data.pid >= 1 &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 60 &&
         data.qty is number && data.qty >= 1 &&
+        data.unitPrice is number && data.unitPrice >= 0 &&
+        data.total is number && data.total >= 0 &&
         data.od is string && data.od.size() == 10 &&
         data.ex is string && data.ex.size() == 10 &&
         data.rc is string && data.rc.size() <= 10 &&
         data.st is string && data.st.size() <= 16 && (data.st == 'pending' || data.st == 'received' || data.st == 'cancelled') &&
+        data.isSample is bool &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
 
-    function isValidAuditLogDoc(data) {
-      return data.keys().hasAll(['id', 'tenantId', 'ownerId', 'k', 'm', 'd', 'actorRole', 'severity', 'n', 'createdAt']) &&
-        data.keys().hasOnly(['id', 'tenantId', 'ownerId', 'k', 'm', 'd', 'actorRole', 'severity', 'n', 'createdAt']) &&
+    function isValidInventoryTransactionDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'pid', 'productId', 'productName', 'date', 'type', 'transactionType', 'qty', 'quantity', 'resultingStock', 'note', 'relatedOrderId', 'actorEmail', 'isSample', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'pid', 'productId', 'productName', 'date', 'type', 'transactionType', 'qty', 'quantity', 'resultingStock', 'note', 'relatedOrderId', 'actorEmail', 'isSample', 'createdAt']) &&
         data.id is number && data.id >= 1 &&
         data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.ownerId == request.auth.uid &&
+        data.pid is number && data.pid >= 1 &&
+        data.productId is string && data.productId.size() >= 1 && data.productId.size() <= 64 && data.productId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 60 &&
+        data.date is string && data.date.size() == 10 &&
+        data.type is string && data.type.size() <= 10 && (data.type == 'IN' || data.type == 'OUT' || data.type == 'ADJUST') &&
+        data.transactionType is string && data.transactionType.size() <= 16 && (data.transactionType == 'PURCHASE' || data.transactionType == 'SALE' || data.transactionType == 'ADJUST') &&
+        data.qty is number && data.qty != 0 &&
+        data.quantity is number && data.quantity >= 1 &&
+        data.resultingStock is number && data.resultingStock >= 0 &&
+        data.note is string && data.note.size() >= 1 && data.note.size() <= 120 &&
+        data.relatedOrderId is string && data.relatedOrderId.size() >= 1 && data.relatedOrderId.size() <= 32 &&
+        data.actorEmail is string && data.actorEmail.size() >= 3 && data.actorEmail.size() <= 120 &&
+        data.isSample is bool &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidForecastDoc(data) {
+      return data.keys().hasAll(['productId', 'tenantId', 'sku', 'productName', 'forecastPeriod', 'windowDays', 'historySeries', 'predictedDailyDemand', 'projectedPeriodTotal', 'method', 'maeMean', 'maeNaive', 'isSample', 'generatedAt']) &&
+        data.keys().hasOnly(['productId', 'tenantId', 'sku', 'productName', 'forecastPeriod', 'windowDays', 'historySeries', 'predictedDailyDemand', 'projectedPeriodTotal', 'method', 'maeMean', 'maeNaive', 'isSample', 'generatedAt']) &&
+        data.productId is number && data.productId >= 1 &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.sku is string && data.sku.size() >= 3 && data.sku.size() <= 20 &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 60 &&
+        data.forecastPeriod is string && data.forecastPeriod.size() >= 1 && data.forecastPeriod.size() <= 30 &&
+        data.windowDays is number && data.windowDays >= 1 && data.windowDays <= 90 &&
+        data.historySeries is list && data.historySeries.size() <= 90 &&
+        (data.historySeries.size() == 0 || data.historySeries[0] is number) &&
+        data.predictedDailyDemand is number && data.predictedDailyDemand >= 0 &&
+        data.projectedPeriodTotal is number && data.projectedPeriodTotal >= 0 &&
+        data.method is string && data.method.size() >= 1 && data.method.size() <= 60 &&
+        data.maeMean is number && data.maeMean >= 0 &&
+        data.maeNaive is number && data.maeNaive >= 0 &&
+        data.isSample is bool &&
+        data.generatedAt is timestamp;
+    }
+
+    function isValidNotificationDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'userId', 'message', 'type', 'relatedRecordId', 'read', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'userId', 'message', 'type', 'relatedRecordId', 'read', 'createdAt', 'updatedAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 64 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 200 &&
+        data.type is string && data.type.size() <= 20 &&
+        (data.type == 'LOW_STOCK' || data.type == 'OUT_OF_STOCK' || data.type == 'PO_UPDATE' || data.type == 'SYSTEM') &&
+        data.relatedRecordId is string && data.relatedRecordId.size() >= 1 && data.relatedRecordId.size() <= 64 &&
+        data.read is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReportDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'reportType', 'dateRange', 'summary', 'totalProducts', 'inventoryValue', 'belowRopCount', 'generatedBy', 'generatedAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'reportType', 'dateRange', 'summary', 'totalProducts', 'inventoryValue', 'belowRopCount', 'generatedBy', 'generatedAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 64 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.reportType is string && data.reportType.size() <= 32 &&
+        (data.reportType == 'CSV_RECOMMENDATIONS' || data.reportType == 'JSON_EXECUTIVE_SUMMARY') &&
+        data.dateRange is string && data.dateRange.size() >= 1 && data.dateRange.size() <= 40 &&
+        data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 200 &&
+        data.totalProducts is number && data.totalProducts >= 0 &&
+        data.inventoryValue is number && data.inventoryValue >= 0 &&
+        data.belowRopCount is number && data.belowRopCount >= 0 &&
+        data.generatedBy is string && data.generatedBy.size() >= 3 && data.generatedBy.size() <= 120 &&
+        data.generatedAt is timestamp;
+    }
+
+    function isValidAuditLogDoc(data) {
+      return data.keys().hasAll(['id', 'tenantId', 'k', 'm', 'd', 'actorEmail', 'actorRole', 'severity', 'n', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'tenantId', 'k', 'm', 'd', 'actorEmail', 'actorRole', 'severity', 'n', 'createdAt']) &&
+        data.id is number && data.id >= 1 &&
+        data.tenantId is string && data.tenantId.size() >= 1 && data.tenantId.size() <= 64 && data.tenantId.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.k is string && data.k.size() >= 1 && data.k.size() <= 40 &&
         data.m is string && data.m.size() >= 1 && data.m.size() <= 200 &&
         data.d is string && data.d.size() == 10 &&
+        data.actorEmail is string && data.actorEmail.size() >= 3 && data.actorEmail.size() <= 120 &&
         data.actorRole is string && data.actorRole.size() <= 32 &&
         (data.actorRole == 'SUPER_ADMIN' || data.actorRole == 'OPS_MANAGER' || data.actorRole == 'INVENTORY_ANALYST' || data.actorRole == 'AUDITOR') &&
         data.severity is string && data.severity.size() <= 16 &&
@@ -154,9 +297,10 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(adminId) && isAdmin();
     }
 
+    // Private User Profile: Strictly isolated to the owner or admin (PII protection)
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
-      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (isAdmin() || existing().uid == request.auth.uid);
       allow create: if isSignedIn() && isValidId(userId) && isValidUserProfileDoc(incoming()) &&
         incoming().uid == userId &&
         incoming().createdAt == request.time &&
@@ -164,6 +308,7 @@ service cloud.firestore {
         (incoming().role == 'INVENTORY_ANALYST' || isAdmin());
       allow update: if isSignedIn() && isValidId(userId) && isValidUserProfileDoc(incoming()) &&
         incoming().uid == existing().uid &&
+        incoming().email == existing().email &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         (
@@ -173,9 +318,33 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(userId) && isAdmin();
     }
 
+    // Top-level Products Collection (/products/{productId}, e.g. PROD001)
+    match /products/{productId} {
+      allow get: if isSignedIn() && isValidId(productId) && (resource == null || canReadCompanyData(existing().tenantId));
+      allow list: if isSignedIn() && existing().tenantId is string;
+      allow create: if isSignedIn() && isValidId(productId) && isValidProductDoc(incoming()) &&
+        incoming().productId == productId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        canManageCatalog(incoming().tenantId);
+      allow update: if isSignedIn() && isValidId(productId) && isValidProductDoc(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().productId == existing().productId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (canManageCatalog(existing().tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['productId', 'sku', 'name', 'productName', 'category', 'description', 'unit', 'cost', 'purchaseCost', 'sellingPrice', 'currentStock', 'lowStockThreshold', 'stockStatus', 'status', 'lead', 'opening', 'safety', 'rop', 'sup', 'isSample', 'updatedAt'])) ||
+          (canManageInventory(existing().tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['productId', 'productName', 'purchaseCost', 'currentStock', 'lowStockThreshold', 'stockStatus', 'opening', 'isSample', 'updatedAt']))
+        );
+      allow delete: if isSignedIn() && isValidId(productId) && canDeleteCatalog(existing().tenantId);
+    }
+
+    // Shared Company Multi-Tenant Workspaces & Business Collections
     match /tenants/{tenantId} {
-      allow get: if isSignedIn() && isValidId(tenantId) && (existing().ownerId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && isValidId(tenantId) && (resource == null || isAdmin() || existing().status == 'ACTIVE' || existing().ownerId == request.auth.uid);
+      allow list: if isSignedIn() && (isAdmin() || existing().status == 'ACTIVE' || existing().ownerId == request.auth.uid);
       allow create: if isSignedIn() && isValidId(tenantId) && isValidTenantWorkspaceDoc(incoming()) &&
         incoming().id == tenantId &&
         incoming().createdAt == request.time &&
@@ -187,71 +356,159 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         (
           isAdmin() ||
-          (existing().ownerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'region', 'today', 'updatedAt']))
+          (existing().ownerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'region', 'status', 'today', 'updatedAt']))
         );
       allow delete: if isSignedIn() && isValidId(tenantId) && isAdmin();
 
       match /products/{productId} {
-        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && (isTenantMasterOwner(tenantId) || isAdmin());
-        allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
         allow create: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && isValidProductDoc(incoming()) &&
           incoming().tenantId == tenantId &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
-          (isTenantMasterOwner(tenantId) || isAdmin());
+          canManageCatalog(tenantId);
         allow update: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && isValidProductDoc(incoming()) &&
           incoming().id == existing().id &&
           incoming().tenantId == existing().tenantId &&
-          incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
           (
             isAdmin() ||
-            (isTenantMasterOwner(tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['sku', 'name', 'cost', 'lead', 'opening', 'safety', 'rop', 'sup', 'updatedAt']))
+            (canManageCatalog(tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['productId', 'sku', 'name', 'productName', 'category', 'description', 'unit', 'cost', 'purchaseCost', 'sellingPrice', 'currentStock', 'lowStockThreshold', 'stockStatus', 'status', 'lead', 'opening', 'safety', 'rop', 'sup', 'isSample', 'updatedAt'])) ||
+            (canManageInventory(tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['productId', 'productName', 'purchaseCost', 'currentStock', 'lowStockThreshold', 'stockStatus', 'opening', 'isSample', 'updatedAt']))
           );
-        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && (isTenantMasterOwner(tenantId) || isAdmin());
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && canDeleteCatalog(tenantId);
       }
 
-      match /transactions/{transactionId} {
-        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && (isTenantMasterOwner(tenantId) || isAdmin());
-        allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
-        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && isValidTransactionDoc(incoming()) &&
+      match /inventory/{productId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && isValidInventoryDoc(incoming()) &&
+          incoming().tenantId == tenantId &&
+          incoming().lastUpdated == request.time &&
+          canManageInventory(tenantId);
+        allow update: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && isValidInventoryDoc(incoming()) &&
+          incoming().productId == existing().productId &&
+          incoming().tenantId == existing().tenantId &&
+          incoming().lastUpdated == request.time &&
+          (
+            isAdmin() ||
+            (canManageInventory(tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['sku', 'productName', 'quantityOnHand', 'reorderLevel', 'safetyStock', 'warehouseLocation', 'status', 'isSample', 'lastUpdated']))
+          );
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && canDeleteCatalog(tenantId);
+      }
+
+      match /suppliers/{supplierId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(supplierId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(supplierId) && isValidSupplierDoc(incoming()) &&
           incoming().tenantId == tenantId &&
           incoming().createdAt == request.time &&
-          (isTenantMasterOwner(tenantId) || isAdmin());
-        allow update: if false;
-        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && (isTenantMasterOwner(tenantId) || isAdmin());
+          incoming().updatedAt == request.time &&
+          canManageCatalog(tenantId);
+        allow update: if isSignedIn() && isValidId(tenantId) && isValidId(supplierId) && isValidSupplierDoc(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().tenantId == existing().tenantId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isAdmin() ||
+            (canManageCatalog(tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'contactPerson', 'email', 'phone', 'address', 'status', 'isSample', 'updatedAt']))
+          );
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(supplierId) && canDeleteCatalog(tenantId);
       }
 
       match /purchaseOrders/{poId} {
-        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && (isTenantMasterOwner(tenantId) || isAdmin());
-        allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
         allow create: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && isValidPurchaseOrderDoc(incoming()) &&
           incoming().id == poId &&
           incoming().tenantId == tenantId &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
-          (isTenantMasterOwner(tenantId) || isAdmin());
+          canManageCatalog(tenantId);
         allow update: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && isValidPurchaseOrderDoc(incoming()) &&
           incoming().id == existing().id &&
           incoming().tenantId == existing().tenantId &&
-          incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
           (
             isAdmin() ||
-            (isTenantMasterOwner(tenantId) && existing().st == 'pending' && incoming().diff(existing()).affectedKeys().hasOnly(['rc', 'st', 'updatedAt']))
+            (canManageCatalog(tenantId) && existing().st == 'pending' && incoming().diff(existing()).affectedKeys().hasOnly(['rc', 'st', 'isSample', 'updatedAt']))
           );
-        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && isAdmin();
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(poId) && canDeleteCatalog(tenantId);
+      }
+
+      match /inventoryTransactions/{transactionId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && isValidInventoryTransactionDoc(incoming()) &&
+          incoming().tenantId == tenantId &&
+          incoming().createdAt == request.time &&
+          canManageInventory(tenantId);
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(transactionId) && canDeleteCatalog(tenantId);
+      }
+
+      match /forecasts/{productId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && isValidForecastDoc(incoming()) &&
+          incoming().tenantId == tenantId &&
+          incoming().generatedAt == request.time &&
+          canManageInventory(tenantId);
+        allow update: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && isValidForecastDoc(incoming()) &&
+          incoming().productId == existing().productId &&
+          incoming().tenantId == existing().tenantId &&
+          incoming().generatedAt == request.time &&
+          (
+            isAdmin() ||
+            (canManageInventory(tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['sku', 'productName', 'forecastPeriod', 'windowDays', 'historySeries', 'predictedDailyDemand', 'projectedPeriodTotal', 'method', 'maeMean', 'maeNaive', 'isSample', 'generatedAt']))
+          );
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(productId) && canDeleteCatalog(tenantId);
+      }
+
+      match /notifications/{notificationId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(notificationId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(notificationId) && isValidNotificationDoc(incoming()) &&
+          incoming().id == notificationId &&
+          incoming().tenantId == tenantId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          canManageInventory(tenantId);
+        allow update: if isSignedIn() && isValidId(tenantId) && isValidId(notificationId) && isValidNotificationDoc(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().tenantId == existing().tenantId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isAdmin() ||
+            (canReadCompanyData(tenantId) && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']))
+          );
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(notificationId) && canManageInventory(tenantId);
+      }
+
+      match /reports/{reportId} {
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(reportId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
+        allow create: if isSignedIn() && isValidId(tenantId) && isValidId(reportId) && isValidReportDoc(incoming()) &&
+          incoming().id == reportId &&
+          incoming().tenantId == tenantId &&
+          incoming().generatedAt == request.time &&
+          canReadCompanyData(tenantId);
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(reportId) && canDeleteCatalog(tenantId);
       }
 
       match /auditLogs/{logId} {
-        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(logId) && (isTenantMasterOwner(tenantId) || isAdmin());
-        allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+        allow get: if isSignedIn() && isValidId(tenantId) && isValidId(logId) && canReadCompanyData(tenantId);
+        allow list: if isSignedIn() && existing().tenantId == tenantId;
         allow create: if isSignedIn() && isValidId(tenantId) && isValidId(logId) && isValidAuditLogDoc(incoming()) &&
           incoming().tenantId == tenantId &&
           incoming().createdAt == request.time &&
-          (isTenantMasterOwner(tenantId) || isAdmin());
+          canReadCompanyData(tenantId);
         allow update: if false;
         allow delete: if isSignedIn() && isValidId(tenantId) && isValidId(logId) && isAdmin();
       }

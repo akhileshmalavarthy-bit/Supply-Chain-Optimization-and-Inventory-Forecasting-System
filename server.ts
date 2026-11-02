@@ -555,8 +555,18 @@ async function startServer() {
       res.status(404).json({ error: 'Tenant not found' });
       return;
     }
-    const { products, transactions, purchaseOrders, auditLogs } = req.body;
-    if (Array.isArray(products) && products.length > 0) {
+    const {
+      products,
+      suppliers,
+      inventory,
+      transactions,
+      purchaseOrders,
+      forecasts,
+      notifications,
+      reports,
+      auditLogs,
+    } = req.body;
+    if (Array.isArray(products)) {
       state.products = products;
       for (const p of products) {
         if (!state.demand[p.id]) {
@@ -564,13 +574,33 @@ async function startServer() {
         }
       }
     }
-    if (Array.isArray(transactions) && transactions.length > 0) {
+    if (Array.isArray(suppliers)) {
+      state.suppliers = suppliers;
+    }
+    if (Array.isArray(inventory)) {
+      state.inventory = inventory;
+    }
+    if (Array.isArray(transactions)) {
       state.transactions = transactions;
     }
-    if (Array.isArray(purchaseOrders) && purchaseOrders.length > 0) {
+    if (Array.isArray(purchaseOrders)) {
       state.purchaseOrders = purchaseOrders;
     }
-    if (Array.isArray(auditLogs) && auditLogs.length > 0) {
+    if (Array.isArray(forecasts)) {
+      state.forecasts = forecasts;
+      for (const f of forecasts) {
+        if (Array.isArray(f.historySeries) && f.historySeries.length > 0) {
+          state.demand[f.productId] = f.historySeries;
+        }
+      }
+    }
+    if (Array.isArray(notifications)) {
+      state.notifications = notifications;
+    }
+    if (Array.isArray(reports)) {
+      state.reports = reports;
+    }
+    if (Array.isArray(auditLogs)) {
       state.auditLogs = auditLogs;
     }
     res.json({ ok: true, state });
@@ -627,6 +657,69 @@ async function startServer() {
       activeTenantId: tenantId,
       state: db.tenantStates[tenantId],
     });
+  });
+
+  app.get('/api/products', authenticateSession, (req: AuthenticatedRequest, res: Response) => {
+    const tenantId = req.tenantId || 'tenant-in-01';
+    const state = db.tenantStates[tenantId];
+    const items = state.products.map((p) => {
+      const currentStock =
+        p.opening + sum(state.transactions.filter((t) => t.pid === p.id).map((t) => t.qty));
+      const status =
+        currentStock <= 0 ? 'Out of Stock' : currentStock <= p.rop ? 'Low Stock' : 'Healthy Stock';
+      return { ...p, currentStock, status };
+    });
+    res.json({ products: items });
+  });
+
+  app.get('/api/analytics/forecast', authenticateSession, (req: AuthenticatedRequest, res: Response) => {
+    const tenantId = req.tenantId || 'tenant-in-01';
+    const state = db.tenantStates[tenantId];
+    const windowDays = Math.max(1, Number(req.query.window) || 30);
+    const horizon = 14;
+    const forecasts = state.products.map((p) => {
+      const series = state.demand[p.id] || [];
+      const slice = series.slice(-windowDays);
+      const meanDaily = slice.length > 0 ? sum(slice) / slice.length : 0;
+      return {
+        productId: p.id,
+        sku: p.sku,
+        name: p.name,
+        windowDays,
+        horizonDays: horizon,
+        baselineDailyForecast: Number(meanDaily.toFixed(2)),
+        projected14DayTotal: Math.round(meanDaily * horizon),
+      };
+    });
+    res.json({ tenantId, generatedOn: state.today, forecasts });
+  });
+
+  app.get('/api/recommendations', authenticateSession, (req: AuthenticatedRequest, res: Response) => {
+    const tenantId = req.tenantId || 'tenant-in-01';
+    const state = db.tenantStates[tenantId];
+    const recommendations = state.products.map((p) => {
+      const currentStock =
+        p.opening + sum(state.transactions.filter((t) => t.pid === p.id).map((t) => t.qty));
+      const series = state.demand[p.id] || [];
+      const avgDaily = series.length > 0 ? sum(series.slice(-30)) / 30 : 0;
+      const leadDemand = avgDaily * p.lead;
+      const rop = Math.round(leadDemand + p.safety);
+      const riskLevel =
+        currentStock <= 0
+          ? 'Out of stock (actual)'
+          : currentStock <= rop
+          ? 'Reorder required'
+          : 'Healthy';
+      return {
+        productId: p.id,
+        sku: p.sku,
+        name: p.name,
+        currentStock,
+        reorderPoint: rop,
+        riskLevel,
+      };
+    });
+    res.json({ tenantId, recommendations });
   });
 
   app.post(

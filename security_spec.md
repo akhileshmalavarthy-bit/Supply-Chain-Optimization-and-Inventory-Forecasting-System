@@ -1,36 +1,35 @@
 # Firestore Zero-Trust Security Specification (`security_spec.md`)
 
-## 1. Data Invariants & Relational Ownership
+## 1. Data Invariants & Role-Based Access Control (RBAC)
 
-1. **Global Default-Deny**: All paths not explicitly matched deny all `read` and `write` operations.
-2. **Verified Authentication**: Every read and write requires `request.auth != null && request.auth.token.email_verified == true`.
-3. **Master Gate (Relational Sync)**:
-   - `/tenants/{tenantId}` is the parent resource owned by `ownerId` (`ownerId == request.auth.uid || isAdmin()`).
-   - Every subcollection document (`products`, `transactions`, `purchaseOrders`, `auditLogs`) must reference a valid existing `/tenants/{tenantId}` where the caller is the tenant owner or a verified admin (`isTenantOwner(tenantId) || isAdmin()`).
-4. **Strict Blueprint Validation (`isValid[Entity]`)**:
-   - Every `create` and `update` operation invokes its `isValid[Entity](incoming())` helper, enforcing `.keys().hasAll(...)`, `.keys().hasOnly(...)`, string `.size()` bounds, regex patterns, and `ownerId == request.auth.uid`.
-5. **Action-Based Updates & Terminal State Locking**:
-   - `PurchaseOrderDoc` cannot be updated by non-admins once `existing().st` reaches a terminal state (`'received'` or `'cancelled'`).
-   - `TransactionDoc` and `AuditLogDoc` are append-only immutable ledgers (updates denied except admin emergency override).
-6. **Temporal Integrity**:
-   - All `createdAt` fields must equal `request.time` on creation and remain immutable (`incoming().createdAt == existing().createdAt`) on update.
-   - All `updatedAt` fields must equal `request.time` on creation and update.
-7. **Query Enforcer (Secure List Queries)**:
-   - Every `allow list` rule enforces `resource.data.ownerId == request.auth.uid || isAdmin()` without performing O(N) `get()` calls on child documents.
-
----
+1. **Default-Deny Catch-All**: All paths not explicitly matched in `firestore.rules` are denied (`allow read, write: if false;`).
+2. **Verified Authentication (`isSignedIn`)**: Every read and write requires `request.auth != null && request.auth.token.email_verified == true`.
+3. **Private User Profile Isolation (`/users/{userId}`)**:
+   - Contains `uid`, `name`, `email`, `role`, `activeTenantId`, `createdAt`, `updatedAt`. Passwords are never stored in Firestore.
+   - `get` and `list` are strictly restricted to the profile owner (`request.auth.uid == userId`) or `isAdmin()`. Users cannot read or modify another user's private profile.
+   - Non-admin users cannot escalate their own `role` during profile creation or update.
+4. **Shared Company Tenant Workspaces & RBAC (`/tenants/{tenantId}/...`)**:
+   - Company inventory data (`products`, `inventory`, `suppliers`, `purchaseOrders`, `inventoryTransactions`, `forecasts`, `notifications`, `reports`, `auditLogs`) is shared across authenticated company users according to their RBAC role (`SUPER_ADMIN`, `OPS_MANAGER`, `INVENTORY_ANALYST`, `AUDITOR`) rather than isolating company inventory by a single user's UID:
+     - `SUPER_ADMIN` / `isAdmin()` / Tenant Owner: Full CRUD across products, suppliers, inventory, purchase orders, forecasts, notifications, reports, and tenant workspaces.
+     - `OPS_MANAGER`: Create/update products, suppliers, inventory, purchase orders, forecasts, notifications, and reports (cannot delete products or manage tenants).
+     - `INVENTORY_ANALYST`: Record inventory transactions, update inventory stock, generate forecasts, and save reports.
+     - `AUDITOR`: Read-only access to company inventory, analytics, and audit logs, plus saving stakeholder audit reports.
+5. **Strict Blueprint Validation (`isValid[Entity]`)**:
+   - Every `create` and `update` invokes its dedicated `isValid[Entity](incoming())` helper enforcing `hasAll`, `hasOnly`, type safety, bounded string lengths, non-negative prices/stock (`quantityOnHand >= 0`), and server timestamps (`request.time`).
+6. **Query Enforcer (`allow list`)**:
+   - Every `allow list` rule on tenant subcollections enforces `existing().tenantId == tenantId` without `get()` or `exists()` calls to prevent O(N) read cost explosions.
 
 ## 2. The "Dirty Dozen" Adversarial Payloads
 
-1. **Payload 1 (Shadow Field Injection)**: Creating a `ProductDoc` with an undeclared field `"isVerified": true`. Rejected by `data.keys().hasOnly(...)`.
-2. **Payload 2 (Identity Spoofing)**: Creating a `TenantWorkspaceDoc` with `ownerId: "victim_uid_999"` when `request.auth.uid == "attacker_uid_111"`. Rejected by `data.ownerId == request.auth.uid`.
-3. **Payload 3 (Unverified Email Admin Spoof)**: Calling an admin route with `request.auth.token.email == "akhileshmalavarthy@gmail.com"` and `email_verified == false`. Rejected by `request.auth.token.email_verified == true`.
-4. **Payload 4 (Self-Assigned Privilege Escalation)**: Creating a `UserProfileDoc` with `role: "SUPER_ADMIN"` as a non-admin user. Rejected by `data.role == 'INVENTORY_ANALYST' || isAdmin()`.
-5. **Payload 5 (ID Poisoning / Denial of Wallet)**: Creating `/tenants/{tenantId}` where `tenantId` is a 1,500-character string or contains special characters (`../`). Rejected by `isValidId(tenantId)`.
-6. **Payload 6 (Orphaned Subcollection Write)**: Creating `/tenants/non_existent_tenant/products/1` where `/tenants/non_existent_tenant` does not exist. Rejected by `isTenantAccessAllowed(tenantId)` master gate.
-7. **Payload 7 (Update-Gap / Value Poisoning)**: Updating an allowed key `name` on `ProductDoc` with a 50,000-character string or boolean. Rejected because `isValidProductDoc(incoming())` wraps the entire `allow update` block.
-8. **Payload 8 (Immortal Field Mutation)**: Updating `createdAt` or `ownerId` on `/tenants/{tenantId}/products/{productId}`. Rejected by `incoming().createdAt == existing().createdAt && incoming().ownerId == existing().ownerId`.
-9. **Payload 9 (Client Timestamp Forgery)**: Creating a `TransactionDoc` with a backdated or future `createdAt` timestamp instead of `request.time`. Rejected by `incoming().createdAt == request.time`.
-10. **Payload 10 (Terminal State Unlocking)**: Attempting to update a `PurchaseOrderDoc` whose `existing().st == 'received'` back to `'pending'`. Rejected by terminal state lock `existing().st == 'pending'`.
-11. **Payload 11 (Ledger Tampering)**: Attempting to `update` an existing `TransactionDoc` or `AuditLogDoc` as a regular user. Rejected by immutable ledger rules (`allow update: if false;`).
-12. **Payload 12 (Blanket List Scraping)**: Attempting an unconstrained `list` query on `/tenants/{tenantId}/products` belonging to another user's tenant. Rejected by `resource.data.ownerId == request.auth.uid || isAdmin()`.
+1. **Unverified Email Spoof**: Token with `email: 'akhileshmalavarthy@gmail.com'` and `email_verified: false` -> `PERMISSION_DENIED`.
+2. **Cross-User Profile Read (PII Leak)**: User `uid_b` attempting `get(/users/uid_a)` -> `PERMISSION_DENIED`.
+3. **Self-Privilege Escalation**: Non-admin user creating `/users/uid_b` with `role: 'SUPER_ADMIN'` -> `PERMISSION_DENIED`.
+4. **Password Field Injection**: Creating `/users/uid_a` with a `password` or `passwordHash` shadow key -> `PERMISSION_DENIED` (`hasOnly` guard).
+5. **ID Poisoning Attack**: Creating a product or PO with a 500-character ID or special characters -> `PERMISSION_DENIED` (`isValidId` guard).
+6. **Negative Inventory Stock**: Creating or updating `/tenants/tenant-in-01/inventory/1` with `quantityOnHand: -10` -> `PERMISSION_DENIED`.
+7. **Shadow Field Injection on Product Update**: Updating `/tenants/tenant-in-01/products/1` with `isVerified: true` -> `PERMISSION_DENIED`.
+8. **Forged Client Timestamp**: Creating a transaction with a past/future `createdAt != request.time` -> `PERMISSION_DENIED`.
+9. **Auditor Unauthorized Product Write**: User with role `AUDITOR` attempting to create or delete a product -> `PERMISSION_DENIED`.
+10. **Terminal Purchase Order Mutation**: Non-admin attempting to modify a `received` or `cancelled` PO -> `PERMISSION_DENIED`.
+11. **Unbounded Forecast Array Exhaustion**: Creating a `forecasts` doc with `historySeries` of 5,000 elements -> `PERMISSION_DENIED` (`historySeries.size() <= 90`).
+12. **Immutable Ledger Tampering**: Attempting `update` on an existing `inventoryTransactions` or `auditLogs` document -> `PERMISSION_DENIED` (`allow update: if false;`).

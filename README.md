@@ -1,6 +1,6 @@
 # Supply Chain Optimization and Inventory Forecasting System
 
-A web-based dashboard prototype for tracking inventory, forecasting product demand, monitoring supplier performance, and recommending when to reorder stock.
+A full-stack, real-time dashboard for tracking multi-tenant inventory, forecasting product demand, monitoring supplier delivery performance, and recommending when to reorder stock — powered by **React**, **D3.js**, **Node.js + Express + WebSockets**, **Firebase Authentication**, and **Cloud Firestore** (`mystical-logic-zdtd0`).
 
 ## Problem Statement
 
@@ -15,7 +15,7 @@ This project brings inventory tracking and demand-planning information together 
 
 ## Objectives
 
-- Track stock levels for each product.
+- Track stock levels for each product in real time.
 - Estimate demand using historical sales data.
 - Calculate reorder points automatically.
 - Monitor supplier delivery performance.
@@ -23,37 +23,27 @@ This project brings inventory tracking and demand-planning information together 
 
 ## Features
 
-- **Dashboard:** key performance indicators and demand/supplier charts.
-- **Product management:** add, edit, delete, search, and sort products.
-- **Inventory ledger:** record stock movements as `IN`, `OUT`, or `ADJUST`.
-- **Demand forecasting:** display a forecast for the next 14 days.
-- **Low-stock alerts:** show stock status using red, amber, and green indicators.
-- **Recommendations:** provide reorder guidance with explanations and CSV export.
+- **Dashboard:** key performance indicators, D3.js inventory status donut chart, 90-day demand analysis chart, supplier delivery chart, and low-stock alerts.
+- **Product & Supplier Management:** add, edit, delete, search, and sort products and suppliers with full Cloud Firestore persistence.
+- **Inventory Ledger:** record stock movements as `IN`, `OUT`, or `ADJUST` using atomic Firestore transactions (`runTransaction`) that prevent negative stock.
+- **Demand Forecasting:** display a 14-day forecast with MAE evaluation (`maeMean` vs `maeNaive`) and save forecast snapshots to Firestore.
+- **Low-Stock Alerts & Notifications:** show stock status using red, amber, and green indicators plus a live Firestore notifications drawer.
+- **Recommendations & Stakeholder Reports:** provide reorder guidance with mathematical explanations, one-click PO queuing, CSV/JSON export, and saved report history in Firestore.
+- **Security, RBAC & Multi-Tenant Isolation:** Google OAuth2 sign-in via Firebase Auth, Role-Based Access Control (`SUPER_ADMIN`, `OPS_MANAGER`, `INVENTORY_ANALYST`, `AUDITOR`), and a real-time Security Audit Log.
 
 ## Technology Stack
 
-### Current prototype
-
-- HTML5 — page structure
-- CSS3 — styling and responsive presentation
-- JavaScript — application logic and calculations
-- Chart.js — charts and graphs
-
-### Planned next stage
-
-- Python with Flask — backend and REST APIs
-- SQL database — persistent storage
-- scikit-learn and/or statsmodels — advanced forecasting
-
-> **Implementation status:** The current prototype runs in the browser and uses sample/in-memory data. Flask, a SQL database, and advanced forecasting libraries are planned for a future stage; do not describe them as implemented unless they have been added separately.
+- **Frontend:** React 19, TypeScript, Tailwind CSS, D3.js (6 custom responsive charts), Lucide Icons
+- **Backend & Real-Time Layer:** Node.js, Express, WebSockets (`ws`)
+- **Persistent Database & Auth:** Firebase Authentication (Google Sign-In) & Cloud Firestore (`mystical-logic-zdtd0` / `ai-studio-supplychainoptim-c40ac3b4-a4fd-4ec9-89a0-697522847e9c`)
 
 ## How It Works
 
-1. Product and supplier information is displayed in the dashboard.
-2. Inventory transactions record stock entering, leaving, or being adjusted.
+1. Product and supplier information is loaded from Cloud Firestore (`onSnapshot` real-time listeners) and displayed in the dashboard.
+2. Inventory transactions record stock entering, leaving, or being adjusted atomically via Firestore transactions.
 3. Historical demand is used to estimate demand for the next 14 days.
 4. The system calculates reorder points using demand, supplier lead time, and safety stock.
-5. Low-stock alerts and recommendations help users decide which products may need replenishment.
+5. Low-stock alerts and recommendations help users decide which products need replenishment.
 
 ### Reorder Point Formula
 
@@ -70,7 +60,7 @@ Reorder Point = (20 × 5) + 30
               = 130 units
 ```
 
-When stock reaches or falls below this level, the product should be considered for reorder.
+When stock reaches or falls below this level, the product is flagged for reorder.
 
 ### Stock Calculation
 
@@ -80,67 +70,69 @@ Current Stock = Opening Stock + IN − OUT + Adjustments
 
 The inventory ledger is used as the source for calculating stock balance.
 
-## Data Model (Planned SQL Design)
+---
 
-The proposed relational database contains:
+## Cloud Firestore Collections, Authentication & Security Rules
 
-- **SUPPLIERS:** supplier details.
-- **PRODUCTS:** SKU, name, unit cost, lead time, safety stock, reorder point, opening stock, and supplier reference.
-- **PURCHASE_ORDERS:** supplier/product references, quantity, order date, expected and received dates, and status.
-- **TRANSACTIONS:** product reference, date, transaction type, quantity, and note.
-- **DEMAND_HISTORY:** product reference, date, and units sold.
+### 1. Connected Firestore Collections
 
-Primary keys (PK) uniquely identify records. Foreign keys (FK) link related records between tables.
+All business records are stored in Cloud Firestore under project `mystical-logic-zdtd0` (database `ai-studio-supplychainoptim-c40ac3b4-a4fd-4ec9-89a0-697522847e9c`):
 
-## Proposed REST API (Planned Flask Backend)
+| Collection Path | Purpose & Key Fields | Connected UI Operations |
+|---|---|---|
+| `/users/{userId}` | Private user profile (`uid`, `name`, `email`, `role`, `activeTenantId`, `createdAt`, `updatedAt`). Never stores passwords. | Created on sign-in; updated when switching RBAC role in **Security & Tenants**. |
+| `/tenants/{tenantId}` | Multi-tenant workspace metadata (`id`, `ownerId`, `name`, `code`, `region`, `currencySymbol`, `status`, `today`, `createdAt`, `updatedAt`). | Workspace selector in sidebar & **Provision Isolated Tenant** form. |
+| `/tenants/{tenantId}/products/{productId}` | Product catalogue (`id`, `sku`, `name`, `category`, `description`, `unit`, `cost`, `sellingPrice`, `status`, `lead`, `opening`, `safety`, `rop`, `sup`, `isSample`). | **Products** table, Add/Edit/Delete Product modals, Dashboard KPIs. |
+| `/tenants/{tenantId}/inventory/{productId}` | Real-time stock balance & warehouse location (`productId`, `sku`, `productName`, `quantityOnHand`, `reorderLevel`, `safetyStock`, `warehouseLocation`, `status`, `lastUpdated`). | Updated atomically (`writeBatch` / `runTransaction`) on product save, ledger transaction, or PO receipt. |
+| `/tenants/{tenantId}/suppliers/{supplierId}` | Approved vendor directory (`id`, `name`, `contactPerson`, `email`, `phone`, `address`, `status`, `isSample`). | **Suppliers Directory** table & Add/Edit/Delete Supplier modal on the **Products** page; Supplier performance metrics on **Dashboard** and **Analytics**. |
+| `/tenants/{tenantId}/purchaseOrders/{poId}` | Supplier purchase orders (`id`, `sup`, `pid`, `productName`, `qty`, `unitPrice`, `total`, `od`, `ex`, `rc`, `st`, `isSample`). | **Quick PO** button in **Recommendations** and **Purchase Order Queue** (`Mark Received` / `Cancel`) in **Analytics**. |
+| `/tenants/{tenantId}/inventoryTransactions/{txId}` | Immutable stock ledger entries (`id`, `pid`, `date`, `type`, `qty`, `note`, `relatedOrderId`, `actorEmail`, `isSample`, `createdAt`). | **Record Transaction** form and **Transaction History** table on the **Inventory** page. |
+| `/tenants/{tenantId}/forecasts/{productId}` | 14-day demand forecast and 90-day historical demand series (`productId`, `sku`, `forecastPeriod`, `windowDays`, `historySeries`, `predictedDailyDemand`, `projectedPeriodTotal`, `method`, `maeMean`, `maeNaive`, `generatedAt`). | **Demand Forecast** evaluation chart and **Save Forecast to Firestore** button on the **Analytics** page. |
+| `/tenants/{tenantId}/notifications/{notificationId}` | Stockout, low-stock, and PO notifications (`id`, `userId`, `message`, `type`, `relatedRecordId`, `read`, `createdAt`). | Top header **Alerts** dropdown (mark as read / delete); auto-created on low-stock or PO events. |
+| `/tenants/{tenantId}/reports/{reportId}` | Saved stakeholder report history (`id`, `reportType`, `dateRange`, `summary`, `totalProducts`, `inventoryValue`, `belowRopCount`, `generatedBy`, `generatedAt`). | Automatically saved when exporting CSV/JSON reports; displayed in **Saved Stakeholder Reports History** on the **Recommendations** page. |
+| `/tenants/{tenantId}/auditLogs/{logId}` | Immutable security and operational audit trail (`id`, `k`, `m`, `d`, `actorEmail`, `actorRole`, `severity`, `n`, `createdAt`). | **Recent Real-Time Activity Stream** on **Dashboard** and **Security Audit Log** table on **Security & Tenants**. |
+
+*(Note: `salesOrders` and `warehouses` are not created as separate collections because outbound demand is tracked directly via `inventoryTransactions` (`OUT`) and `forecasts`, and warehouse locations are stored directly on each `inventory` record.)*
+
+### 2. Sample Data Policy
+
+- Initial demo records are seeded **only once** if a tenant workspace does not yet exist in Firestore.
+- Existing Firestore records are **never overwritten** on page reload or sign-in.
+- All initial demo documents include `isSample: true` and display a `SAMPLE` badge in the UI; any record added or edited by a user is saved with `isSample: false` and displays a green `LIVE` badge.
+
+### 3. Authentication & Zero-Trust Firestore Security Rules (`firestore.rules`)
+
+- **Authentication:** Uses Firebase Authentication with Google Sign-In (`signInWithPopup`).
+- **Private User Profile Isolation:** `/users/{userId}` can only be read or updated by the profile owner (`request.auth.uid == userId`) or a verified administrator (`isAdmin()`).
+- **Shared Company Data with Role-Based Access Control (RBAC):**
+  - Authenticated company users with verified emails can read shared tenant data (`products`, `inventory`, `suppliers`, `purchaseOrders`, `inventoryTransactions`, `forecasts`, `notifications`, `reports`, `auditLogs`) when querying by `tenantId`.
+  - Write permissions are enforced by role (`SUPER_ADMIN`, `OPS_MANAGER`, `INVENTORY_ANALYST`, `AUDITOR`) and validated by strict schema helpers (`isValid[Entity]`) that check field allowlists (`hasAll` / `hasOnly`), string bounds, non-negative stock/cost invariants, and server timestamps (`request.time`).
+
+### 4. How to Verify Firestore Persistence
+
+1. Click **Sign in with Google (Firestore)** in the top header or left sidebar.
+2. Confirm the header status indicator changes to **`Firestore: PERSISTENT (mystical-logic-zdtd0)`**.
+3. Go to **Products** and click **Add Product** (or edit an existing product, add a supplier, record an `IN`/`OUT` transaction in **Inventory**, queue/receive a PO in **Recommendations** / **Analytics**, or export a report).
+4. Refresh the browser page (or sign out and sign back in).
+5. Verify that your added/edited records, updated stock balances, and audit logs remain persisted from Cloud Firestore with the green **`LIVE`** badge.
+
+---
+
+## REST API Endpoints (`server.ts`)
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/products` | List products with stock status |
+| GET | `/api/bootstrap` | Retrieve initial workspace metadata and RBAC permissions |
+| POST | `/api/firestore/sync-tenant` | Synchronize live Firestore snapshots with Express/WebSocket state |
+| GET | `/api/products` | List products with current stock status |
 | POST | `/api/products` | Add a product |
-| PUT | `/api/products/<id>` | Edit a product |
-| DELETE | `/api/products/<id>` | Remove a product |
+| PUT | `/api/products/:id` | Edit a product |
+| DELETE | `/api/products/:id` | Remove a product |
 | POST | `/api/transactions` | Record an IN, OUT, or ADJUST transaction |
+| POST | `/api/purchase-orders` | Queue a new purchase order |
+| PATCH | `/api/purchase-orders/:id` | Mark a purchase order as `received` or `cancelled` |
 | GET | `/api/analytics/forecast` | Retrieve the 14-day demand forecast |
 | GET | `/api/recommendations` | Retrieve reorder and risk recommendations |
-
-These endpoints are proposed for the future Flask version; the current browser prototype does not necessarily expose them.
-
-## Running the Current Prototype
-
-The project presentation describes a browser-based HTML/CSS/JavaScript prototype. If the project folder contains an HTML entry file:
-
-1. Download or clone the project repository.
-2. Open the project folder.
-3. Open the main HTML file (often `index.html`) in a modern browser.
-
-If the project uses local assets or requires a local web server, follow the setup instructions included in that project folder. The source-code folder was not provided here, so the exact entry filename and dependency setup cannot be confirmed.
-
-## Sample Data
-
-The prototype presentation describes sample data consisting of:
-
-- 10 products
-- 5 suppliers
-- 14 purchase orders
-- 90 days of demand history
-
-These figures describe the sample data used in the prototype, not necessarily live business data.
-
-## Limitations
-
-- The current version is a prototype that uses sample data in the browser.
-- A persistent SQL database and Flask backend are planned for the next stage.
-- Forecast quality depends on the quality and amount of historical data.
-- Recommendations support decision-making; the prototype does not automatically place purchase orders.
-
-## Future Enhancements
-
-- Add a Flask backend and persistent SQL database.
-- Improve forecasting with scikit-learn or statsmodels.
-- Support purchase-order creation and supplier follow-up.
-- Add email and mobile alerts for low stock.
-- Add user login and role-based access.
 
 ## Team
 
@@ -150,7 +142,3 @@ These figures describe the sample data used in the prototype, not necessarily li
 - Shaheen
 
 **Institution:** Mohan Babu University (MBU)
-
-## License
-
-No license information was provided. Add a license file if you intend to distribute or publish this project.
